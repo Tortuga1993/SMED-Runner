@@ -393,7 +393,16 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
   function handleTouchStartCombined(e){
     const touch=e.touches[0];
     const sx=touch.clientX, sy=touch.clientY;
-    lpTimer.current=setTimeout(()=>{ onContextMenu(opId,task.id,tIdx,sx,sy); if(navigator.vibrate)navigator.vibrate(20); },500);
+    // 500ms hold-still → context menu
+    lpTimer.current=setTimeout(()=>{
+      // Only fire context menu if finger hasn't moved into a drag
+      if(dragState.current?.pending!==false) { // still pending (no movement confirmed drag)
+        dragState.current=null; // cancel any pending drag
+        setDragging(null);
+        onContextMenu(opId,task.id,tIdx,sx,sy);
+        if(navigator.vibrate) navigator.vibrate(20);
+      }
+    },500);
     onTouchStart(e,task.id,opId);
   }
   function clearLP(){ clearTimeout(lpTimer.current); }
@@ -951,6 +960,12 @@ function SMEDAppInner() {
   const [demoProject,setDemoProject] = useState(null); // holds the temporary demo board
   const [tutorialStep,setTutorialStep] = useState(null); // null = no tutorial, 0+ = step index
 
+  // ── always-current refs so drag callbacks never have stale closures ──────────
+  const activeIdRef    = useRef(activeId);
+  const demoProjectRef = useRef(demoProject);
+  activeIdRef.current    = activeId;      // updated inline every render — no useEffect needed
+  demoProjectRef.current = demoProject;
+
   // activeProject is either the demo (if active) or a real saved project
   const activeProject = demoProject || projects.find(p=>p.id===activeId)||null;
   const operators = activeProject?.operators||[];
@@ -1052,8 +1067,9 @@ function SMEDAppInner() {
     });
   }
   function mutateOps(fn) {
-    if (demoProject) { setDemoProject(p=>({...p, operators:fn(p.operators)})); return; }
-    mutateProject(activeId,p=>({operators:fn(p.operators)}));
+    // Use refs so this always works even when called from stale closures (e.g. drag handlers)
+    if (demoProjectRef.current) { setDemoProject(p=>({...p, operators:fn(p.operators)})); return; }
+    mutateProject(activeIdRef.current, p=>({operators:fn(p.operators)}));
   }
 
   // ── tutorial / demo ───────────────────────────────────────────────────────────
@@ -1238,33 +1254,43 @@ function SMEDAppInner() {
   }, []);
   const onDragOver = useCallback((e, opId, index) => { e.preventDefault(); setDragOver({ opId, index }); }, []);
   const onDragEnd  = useCallback(() => { setDragging(null); setDragOver(null); dragState.current = null; }, []);
-  const onDrop = useCallback((e, toOpId, toIndex) => { e.preventDefault(); commitMove(toOpId, toIndex); }, []);
+  // onDrop: no useCallback so it always has a fresh reference to commitMove
+  const onDrop = (e, toOpId, toIndex) => { e.preventDefault(); commitMove(toOpId, toIndex); };
 
   // ── touch drag (iOS / Android) ──
   const touchLong = useRef(null);
 
   const onTouchStart = useCallback((e, taskId, fromOpId) => {
-    // Long-press 200ms to initiate drag
+    // Store the identity of what we're touching — drag won't start until finger moves
     const touch = e.touches[0];
-    touchLong.current = setTimeout(() => {
-      dragState.current = { taskId, fromOpId };
-      setDragging({ taskId, fromOpId });
-      // haptic if available
-      if (navigator.vibrate) navigator.vibrate(30);
-    }, 200);
+    dragState.current = { taskId, fromOpId, pending: true, startX: touch.clientX, startY: touch.clientY };
+    // The 500ms long-press for context menu is handled inside TaskCard's handleTouchStartCombined
+    // so nothing to do here except record identity
   }, []);
 
   const onTouchMove = useCallback((e) => {
-    if (!dragState.current) { clearTimeout(touchLong.current); return; }
-    e.preventDefault();
+    if (!dragState.current) return;
     const touch = e.touches[0];
+    const dx = touch.clientX - (dragState.current.startX||0);
+    const dy = touch.clientY - (dragState.current.startY||0);
+    const moved = Math.sqrt(dx*dx+dy*dy) > 6;
+
+    if (dragState.current.pending) {
+      if (!moved) return;
+      // Commit to drag — read taskId/fromOpId BEFORE mutation to avoid race
+      const { taskId, fromOpId } = dragState.current;
+      dragState.current = { taskId, fromOpId, pending: false, startX: dragState.current.startX, startY: dragState.current.startY };
+      setDragging({ taskId, fromOpId });
+      if (navigator.vibrate) navigator.vibrate(20);
+    }
+    if (!dragState.current || dragState.current.pending) return;
+    e.preventDefault();
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     if (!el) return;
-    // Walk up DOM to find a task-drop-zone or op-drop-zone
     let node = el;
     while (node && node !== document.body) {
-      const opId   = node.dataset?.opid;
-      const tIdx   = node.dataset?.tidx;
+      const opId = node.dataset?.opid;
+      const tIdx = node.dataset?.tidx;
       if (opId !== undefined) {
         setDragOver({ opId, index: tIdx !== undefined ? Number(tIdx) : 9999 });
         return;
@@ -1273,9 +1299,13 @@ function SMEDAppInner() {
     }
   }, []);
 
-  const onTouchEnd = useCallback((e) => {
+  // onTouchEnd: no useCallback so commitMove always has fresh closure via refs
+  const onTouchEnd = (e) => {
     clearTimeout(touchLong.current);
-    if (!dragState.current) return;
+    if (!dragState.current || dragState.current.pending) {
+      dragState.current = null;
+      return;
+    }
     const touch = e.changedTouches[0];
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     let node = el;
@@ -1286,7 +1316,7 @@ function SMEDAppInner() {
     }
     if (toOpId) commitMove(toOpId, toIndex);
     else { setDragging(null); setDragOver(null); dragState.current = null; }
-  }, []);
+  };
 
   useEffect(() => {
     if (!dragging) return;
