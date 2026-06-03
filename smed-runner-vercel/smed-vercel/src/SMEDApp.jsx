@@ -67,29 +67,32 @@ function makeDemoProject() {
     isDemo:true,
     name:"☕ Tea & 🍞 Toast — Demo",
     created:Date.now(),
-    notes:"A demo changeover: making a cup of tea and a piece of toast. Notice the waiting blocks (striped) and the bottleneck (the slower operator, highlighted orange). Drag tasks between the two people to balance them so they finish together!",
+    notes:"DEMO: two people make a brew and toast at the same time. Person 1 (Tea) is the bottleneck with lots of waiting — try dragging some of their tasks to Person 2 to balance the load and finish faster!",
     taskTypes: DEFAULT_TASK_TYPES.map(t=>({...t})),
     operators:[
       {
+        // Person 1 — Tea: deliberately the BOTTLENECK, with heavy WAITING (kettle + brew)
         id:uid(), name:"Person 1 — Tea",
         tasks:[
-          T("Fill & boil kettle",4,"Validated"),
-          W(3),                                  // waiting for kettle
-          T("Get cup & teabag",1,"Non-Validated"),
+          T("Fill & switch on kettle",2,"Validated"),
+          W(5),                                   // waiting for kettle to boil
+          T("Get cup, teabag & spoon",2,"Non-Validated"),
           T("Pour boiling water",1,"Validated"),
-          W(3),                                  // waiting for brew
-          T("Remove teabag",1,"Non-Validated"),
-          T("Add milk & stir",1,"Validated"),
+          W(4),                                   // waiting for tea to brew
+          T("Remove & bin teabag",1,"Non-Validated"),
+          T("Add milk & sugar",1,"Validated"),
+          T("Stir & serve",1,"Validated"),
         ],
       },
       {
+        // Person 2 — Toast: shorter, with one clear WAIT (toaster) — room to take more work
         id:uid(), name:"Person 2 — Toast",
         tasks:[
-          T("Get bread out",1,"Non-Validated"),
-          T("Put bread in toaster",1,"Validated"),
-          W(4),                                  // waiting for toaster
+          T("Get bread & plate",1,"Non-Validated"),
+          T("Load & start toaster",1,"Validated"),
+          W(3),                                   // waiting for toaster
           T("Butter the toast",2,"Validated"),
-          T("Plate up & serve",1,"Non-Validated"),
+          T("Cut & plate up",1,"Non-Validated"),
         ],
       },
     ],
@@ -98,17 +101,18 @@ function makeDemoProject() {
 
 // ── Tutorial walkthrough steps ────────────────────────────────────────────────
 const TUTORIAL_STEPS = [
-  { title:"Welcome to SMED Runner! 👋", body:"This demo shows two people working in parallel: one making tea, one making toast. Let's walk through every feature. Tap Next to begin." },
-  { title:"The Operator Columns", body:"Each column is one person and their tasks, top to bottom. The number (e.g. 12m) is their total time. The ORANGE column is the BOTTLENECK — the slowest person who sets how long the whole changeover takes." },
-  { title:"Task Types & Colours", body:"Each task is colour-coded: green = Validated (value-add), blue = Non-Validated, orange = Waiting. The coloured dot and label tell you the category at a glance." },
-  { title:"Waiting / Downtime ⏸", body:"See the grey STRIPED blocks? Those are waiting times — like waiting for the kettle to boil or the toaster to pop. This is idle time where the person can't do anything. Reducing these is a key SMED goal!" },
-  { title:"Try Dragging a Task", body:"Now YOU try: press and hold a task (or click-drag on desktop) and move it to the OTHER person's column. Watch the times and efficiency update instantly. Balancing the load is the whole point of SMED!" },
-  { title:"Add Your Own Task", body:"Tap the + ADD TASK button at the bottom of any column. Give it a name, a time in minutes, and a type. Try adding one now!" },
-  { title:"Add a Waiting Block", body:"Tap the ⏸ ADD WAIT button to add a downtime block to a person. Use this to represent any time they're stood waiting." },
-  { title:"Switch to Gantt View ▤", body:"Tap the ▤ icon at the top right. The Gantt view shows time flowing downward, so you can see exactly when each person is busy or waiting, side by side." },
-  { title:"Run the Simulation ▶", body:"Tap ▶ RUN at the top, then press START. Watch the changeover play out live — tasks light up as they happen, and you'll see who finishes first and who's the bottleneck." },
-  { title:"View the Report 📊", body:"Tap 📊 REPORT to see efficiency, total waiting time, a breakdown by task type, and improvement recommendations. You can export it as a PDF or Excel too." },
-  { title:"You're all set! 🎉", body:"That's everything! Nothing here is saved — when you leave, this demo resets fresh for the next person. When you're ready, go HOME and tap START SMED BOARD to plan a real changeover." },
+  { title:"Welcome to SMED Runner! 👋", body:"SMED means 'Single Minute Exchange of Die' — the lean method of making changeovers as fast as possible. This demo shows two people doing a tea & toast changeover in parallel. Tap Next and we'll walk through every feature together." },
+  { title:"The Operator Columns", body:"Each column is one person and their tasks, listed top to bottom in the order they happen. The number by their name (e.g. 14m) is their total time. The person who takes longest is the BOTTLENECK — outlined in orange — because they decide how long the whole changeover takes." },
+  { title:"Task Height = Time ⏱️", body:"Notice each task block's HEIGHT matches how long it takes — a 4-minute task is taller than a 1-minute one. This lets you see at a glance where the time goes, like a timeline running downward." },
+  { title:"Task Types & Colours", body:"Tasks are colour-coded: 🟢 GREEN = Validated (essential, adds value) and 🔵 BLUE = Non-Validated (necessary but not adding value — a target to reduce). The coloured tag on each task shows its type." },
+  { title:"Waiting / Downtime ⏸", body:"The grey STRIPED blocks are waiting time — like waiting for the kettle to boil or the toaster to pop. Nobody is doing useful work during these. Cutting waiting time is one of the biggest wins in SMED!" },
+  { title:"Work vs Wait — the chips 📊", body:"Look at the chips near the top. Each person shows their WORK time (green) and WAIT time (orange) separately. Person 1 (Tea) has lots of waiting — that's your clue they could be doing something useful while the kettle boils." },
+  { title:"Try Dragging a Task ✋", body:"Your turn! Press and hold a task (or click-drag on a computer) and move it into the OTHER person's column. Watch the times and the EFFICIENCY score at the top update instantly. Balancing the two people so they finish together is the whole goal." },
+  { title:"Add Your Own Task ➕", body:"At the bottom of any column, tap '+ ADD TASK'. Give it a name, a time in minutes, and pick a type. Try adding one — maybe 'Wash the spoon' to Person 1!" },
+  { title:"Add a Wait — two ways ⏸", body:"To add downtime: either tap the orange '⏸ ADD WAIT' button at the bottom of a column, OR right-click a task (long-press on mobile, or tap the ⋮ icon) and choose 'Add wait above/below'. Either way it asks HOW MANY MINUTES. Try adding a 2-minute wait somewhere!" },
+  { title:"Run the Simulation ▶", body:"Tap '▶ RUN' at the top, then press START. Watch the changeover play out live — tasks light up as they happen, waiting blocks show as idle, and you'll see exactly who finishes first and who's holding things up." },
+  { title:"The Report & Export 📊", body:"Tap '📊 REPORT' for efficiency, total waiting time, a breakdown by type, and improvement tips. From '↓ EXPORT' you can download the Gantt as a PDF or get an Excel template to bulk-import tasks." },
+  { title:"You're all set! 🎉", body:"That's the full tour! Remember: nothing here is saved — leaving resets the demo fresh for the next person. When you're ready for the real thing, go HOME and tap 'START SMED BOARD'. Happy balancing!" },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
