@@ -13,14 +13,13 @@ const OP_COLORS = [
 const DEFAULT_TASK_TYPES = [
   { name:"Validated",    color:"#00B894" },
   { name:"Non-Validated",color:"#74B9FF" },
-  { name:"Waiting",      color:"#FF6B35" },
 ];
 
 const TASK_TEMPLATES = {
   "Die Change": [
     {name:"Remove old die",duration:8,type:"Validated"},
     {name:"Clean press bed",duration:5,type:"Non-Validated"},
-    {name:"Fetch new die",duration:6,type:"Waiting"},
+    {name:"Fetch new die",duration:6,type:"Non-Validated"},
     {name:"Install new die",duration:10,type:"Validated"},
     {name:"Adjust clamps",duration:7,type:"Non-Validated"},
     {name:"Trial run & inspect",duration:6,type:"Validated"},
@@ -28,7 +27,7 @@ const TASK_TEMPLATES = {
   "Product Changeover": [
     {name:"Clear previous product",duration:5,type:"Non-Validated"},
     {name:"Clean surfaces",duration:8,type:"Non-Validated"},
-    {name:"Retrieve new materials",duration:6,type:"Waiting"},
+    {name:"Retrieve new materials",duration:6,type:"Non-Validated"},
     {name:"Load product spec",duration:3,type:"Validated"},
     {name:"First article inspection",duration:5,type:"Validated"},
     {name:"Update work order",duration:2,type:"Validated"},
@@ -36,7 +35,7 @@ const TASK_TEMPLATES = {
   "CNC Setup": [
     {name:"Remove previous job",duration:6,type:"Non-Validated"},
     {name:"Clean fixture & table",duration:7,type:"Non-Validated"},
-    {name:"Retrieve program & tooling",duration:5,type:"Waiting"},
+    {name:"Retrieve program & tooling",duration:5,type:"Non-Validated"},
     {name:"Install fixture",duration:9,type:"Validated"},
     {name:"Set tool offsets",duration:8,type:"Non-Validated"},
     {name:"First-off measurement",duration:6,type:"Validated"},
@@ -1998,9 +1997,9 @@ create policy "public_all_projects" on projects
                         ⊞ TEMPLATE
                       </button>
                       <button onClick={()=>addWait(op.id)} title="Add waiting / downtime block"
-                        style={{flex:1,padding:"8px",background:"#1A1F2B",border:"1px dashed #4a5160",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
-                        onMouseEnter={e=>{e.target.style.borderColor=WAIT_COLOR;e.target.style.color="#b0b8c8";}}
-                        onMouseLeave={e=>{e.target.style.borderColor="#4a5160";e.target.style.color="#8a94a8";}}>
+                        style={{flex:1,padding:"8px",background:"rgba(255,107,53,0.12)",border:"1px solid #FF6B35",color:"#FF6B35",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
+                        onMouseEnter={e=>{e.target.style.background="rgba(255,107,53,0.22)";}}
+                        onMouseLeave={e=>{e.target.style.background="rgba(255,107,53,0.12)";}}>
                         ⏸ ADD WAIT
                       </button>
                     </div>
