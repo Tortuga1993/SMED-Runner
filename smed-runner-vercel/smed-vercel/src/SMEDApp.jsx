@@ -43,8 +43,13 @@ const TASK_TEMPLATES = {
   ],
 };
 
+const WAIT_COLOR = "#6B7280"; // grey for downtime/waiting
+
 function blankOperator(index) {
   return { id:uid(), name:`Operator ${index+1}`, tasks:[] };
+}
+function makeWait(duration=5) {
+  return { id:uid(), name:"Waiting / Downtime", duration, type:"__WAIT__", isWait:true };
 }
 function defaultProject(name="New Changeover", operatorCount=2, taskTypes=DEFAULT_TASK_TYPES) {
   return {
@@ -53,6 +58,59 @@ function defaultProject(name="New Changeover", operatorCount=2, taskTypes=DEFAUL
     operators: Array.from({length:operatorCount},(_,i)=>blankOperator(i)),
   };
 }
+
+// ── Demo board: Tea & Toast changeover (always regenerated fresh) ─────────────
+function makeDemoProject() {
+  const T = (name,duration,type) => ({id:uid(),name,duration,type});
+  const W = (duration) => ({id:uid(),name:"Waiting / Downtime",duration,type:"__WAIT__",isWait:true});
+  return {
+    id:"__DEMO__",
+    isDemo:true,
+    name:"☕ Tea & 🍞 Toast — Demo",
+    created:Date.now(),
+    notes:"A demo changeover: making a cup of tea and a piece of toast. Notice the waiting blocks (striped) and the bottleneck (the slower operator, highlighted orange). Drag tasks between the two people to balance them so they finish together!",
+    taskTypes: DEFAULT_TASK_TYPES.map(t=>({...t})),
+    operators:[
+      {
+        id:uid(), name:"Person 1 — Tea",
+        tasks:[
+          T("Fill & boil kettle",4,"Validated"),
+          W(3),                                  // waiting for kettle
+          T("Get cup & teabag",1,"Non-Validated"),
+          T("Pour boiling water",1,"Validated"),
+          W(3),                                  // waiting for brew
+          T("Remove teabag",1,"Non-Validated"),
+          T("Add milk & stir",1,"Validated"),
+        ],
+      },
+      {
+        id:uid(), name:"Person 2 — Toast",
+        tasks:[
+          T("Get bread out",1,"Non-Validated"),
+          T("Put bread in toaster",1,"Validated"),
+          W(4),                                  // waiting for toaster
+          T("Butter the toast",2,"Validated"),
+          T("Plate up & serve",1,"Non-Validated"),
+        ],
+      },
+    ],
+  };
+}
+
+// ── Tutorial walkthrough steps ────────────────────────────────────────────────
+const TUTORIAL_STEPS = [
+  { title:"Welcome to SMED Runner! 👋", body:"This demo shows two people working in parallel: one making tea, one making toast. Let's walk through every feature. Tap Next to begin." },
+  { title:"The Operator Columns", body:"Each column is one person and their tasks, top to bottom. The number (e.g. 12m) is their total time. The ORANGE column is the BOTTLENECK — the slowest person who sets how long the whole changeover takes." },
+  { title:"Task Types & Colours", body:"Each task is colour-coded: green = Validated (value-add), blue = Non-Validated, orange = Waiting. The coloured dot and label tell you the category at a glance." },
+  { title:"Waiting / Downtime ⏸", body:"See the grey STRIPED blocks? Those are waiting times — like waiting for the kettle to boil or the toaster to pop. This is idle time where the person can't do anything. Reducing these is a key SMED goal!" },
+  { title:"Try Dragging a Task", body:"Now YOU try: press and hold a task (or click-drag on desktop) and move it to the OTHER person's column. Watch the times and efficiency update instantly. Balancing the load is the whole point of SMED!" },
+  { title:"Add Your Own Task", body:"Tap the + ADD TASK button at the bottom of any column. Give it a name, a time in minutes, and a type. Try adding one now!" },
+  { title:"Add a Waiting Block", body:"Tap the ⏸ ADD WAIT button to add a downtime block to a person. Use this to represent any time they're stood waiting." },
+  { title:"Switch to Gantt View ▤", body:"Tap the ▤ icon at the top right. The Gantt view shows time flowing downward, so you can see exactly when each person is busy or waiting, side by side." },
+  { title:"Run the Simulation ▶", body:"Tap ▶ RUN at the top, then press START. Watch the changeover play out live — tasks light up as they happen, and you'll see who finishes first and who's the bottleneck." },
+  { title:"View the Report 📊", body:"Tap 📊 REPORT to see efficiency, total waiting time, a breakdown by task type, and improvement recommendations. You can export it as a PDF or Excel too." },
+  { title:"You're all set! 🎉", body:"That's everything! Nothing here is saved — when you leave, this demo resets fresh for the next person. When you're ready, go HOME and tap START SMED BOARD to plan a real changeover." },
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SUPABASE CONFIG
@@ -169,7 +227,7 @@ const iconBtnSty = {
 };
 
 function Pill({color,children,style={}}) {
-  return <span style={{fontSize:10,padding:"2px 8px",borderRadius:12,background:color+"22",color,fontWeight:600,letterSpacing:"0.04em",...style}}>{children}</span>;
+  return <span style={{fontSize:10,padding:"2px 8px",borderRadius:12,background:color+"2E",color,fontWeight:700,letterSpacing:"0.04em",...style}}>{children}</span>;
 }
 function Btn({onClick,color="#FF6B35",text="#0D0F14",children,full,style={},disabled=false,sm=false}) {
   return (
@@ -208,11 +266,12 @@ function ReportPanel({operators, taskTypes, onClose}) {
   const total = allTasks.reduce((s,t)=>s+t.duration,0);
   const efficiency = Math.round((minTime/maxTime)*100);
   const waste = operators.reduce((s,o)=>s+(maxTime-o.tasks.reduce((sum,t)=>sum+t.duration,0)),0);
+  const plannedDowntime = allTasks.filter(t=>t.isWait).reduce((s,t)=>s+t.duration,0);
 
   function exportCSV() {
     const rows=[["Operator","Task","Type","Duration (min)","Start (min)"]];
     operators.forEach(op=>{
-      let c=0; op.tasks.forEach(t=>{rows.push([op.name,t.name,t.type,t.duration,c]);c+=t.duration;});
+      let c=0; op.tasks.forEach(t=>{rows.push([op.name,t.isWait?"Waiting / Downtime":t.name,t.isWait?"Waiting":t.type,t.duration,c]);c+=t.duration;});
     });
     const csv=rows.map(r=>r.map(c=>`"${c}"`).join(",")).join("\n");
     const a=document.createElement("a");
@@ -233,7 +292,7 @@ function ReportPanel({operators, taskTypes, onClose}) {
         <div style={{padding:16,display:"flex",flexDirection:"column",gap:14}}>
           {/* KPIs */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10}}>
-            {[["EFFICIENCY",efficiency+"%",efficiency>85?"#00B894":efficiency>60?"#FFE66D":"#E17055"],["MAX TIME",maxTime+"m","#FF6B35"],["IDLE WASTE",waste+"m","#E17055"],["TOTAL TASKS",allTasks.length,"#4ECDC4"]].map(([l,v,c])=>(
+            {[["EFFICIENCY",efficiency+"%",efficiency>85?"#00B894":efficiency>60?"#FFE66D":"#E17055"],["MAX TIME",maxTime+"m","#FF6B35"],["IDLE GAP",waste+"m","#E17055"],["PLANNED WAIT",plannedDowntime+"m",WAIT_COLOR]].map(([l,v,c])=>(
               <div key={l} style={{background:"#080A0F",border:"1px solid #1E2130",borderRadius:8,padding:"12px 14px"}}>
                 <div style={{fontSize:8,color:"#4a5568",letterSpacing:"0.14em",marginBottom:3}}>{l}</div>
                 <div style={{fontSize:24,fontWeight:800,color:c}}>{v}</div>
@@ -243,13 +302,14 @@ function ReportPanel({operators, taskTypes, onClose}) {
           {/* Type breakdown */}
           <div style={{background:"#080A0F",border:"1px solid #1E2130",borderRadius:8,padding:"14px"}}>
             <div style={{fontSize:9,color:"#4a5568",letterSpacing:"0.14em",marginBottom:10}}>TIME BY TYPE</div>
-            {taskTypes.map(tt=>{
-              const tasks=allTasks.filter(t=>t.type===tt.name);
+            {[...taskTypes, {name:"Waiting / Downtime",color:WAIT_COLOR,__wait:true}].map(tt=>{
+              const tasks = tt.__wait ? allTasks.filter(t=>t.isWait) : allTasks.filter(t=>!t.isWait && t.type===tt.name);
               const time=tasks.reduce((s,t)=>s+t.duration,0);
               const pct=total>0?Math.round(time/total*100):0;
+              if (tt.__wait && time===0) return null;
               return (
                 <div key={tt.name} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-                  <div style={{width:90,fontSize:10,color:tt.color,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tt.name}</div>
+                  <div style={{width:110,fontSize:10,color:tt.color,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{tt.__wait?"⏸ ":""}{tt.name}</div>
                   <div style={{flex:1,background:"#1A1D26",borderRadius:2,height:8}}>
                     <div style={{width:pct+"%",height:"100%",background:tt.color,borderRadius:2,transition:"width 0.4s"}}/>
                   </div>
@@ -316,7 +376,8 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
   const isDone   = phase==="run"&&runMinutes>=taskStart+task.duration;
   const isDraggingThis = dragging?.taskId===task.id;
   const isDropTarget   = dragOver?.opId===opId&&dragOver?.index===tIdx;
-  const tt = taskTypes.find(t=>t.name===task.type)||taskTypes[0]||{name:"",color:"#aaa"};
+  const isWait = task.isWait;
+  const tt = isWait ? {name:"Waiting",color:WAIT_COLOR} : (taskTypes.find(t=>t.name===task.type)||taskTypes[0]||{name:"",color:"#aaa"});
   const tc = tt.color;
   return (
     <>
@@ -332,35 +393,46 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
         onTouchEnd={onTouchEnd}
         data-opid={opId}
         data-tidx={tIdx}
-        style={{background:isDone?"#0a150a":isActive?tc+"18":isDraggingThis?"#1a1f2e":"#080A0F",border:`1px solid ${isActive?tc:isDone?"#1a2e1a":isDraggingThis?"#4ECDC4":"#1E2130"}`,borderRadius:8,padding:"9px 10px",marginBottom:6,cursor:"grab",opacity:isDraggingThis?0.35:1,boxShadow:isActive?`0 0 14px ${tc}44`:isDraggingThis?"0 0 12px #4ECDC444":"none",transition:"all 0.18s",userSelect:"none",touchAction:"none"}}>
+        style={{
+          background:isWait
+            ? `repeating-linear-gradient(45deg, #20242E, #20242E 6px, #181C24 6px, #181C24 12px)`
+            : (isDone?"#0d1f0d":isActive?tc+"22":isDraggingThis?"#1f2535":"#1A1F2B"),
+          border:`1px ${isWait?"dashed":"solid"} ${isActive?tc:isDone?"#2a4a2a":isDraggingThis?"#4ECDC4":isWait?"#4a5160":"#2E3445"}`,
+          borderRadius:8,padding:"10px 12px",marginBottom:7,cursor:"grab",opacity:isDraggingThis?0.35:1,
+          boxShadow:isActive?`0 0 14px ${tc}55`:isDraggingThis?"0 0 12px #4ECDC444":"0 1px 3px #00000040",
+          transition:"all 0.18s",userSelect:"none",touchAction:"none"
+        }}>
         {editing?(
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
-            <input value={task.name} onChange={e=>onUpdate("name",e.target.value)} style={{...iSty,fontSize:12,padding:"7px 10px"}} autoFocus/>
+            {!isWait&&<input value={task.name} onChange={e=>onUpdate("name",e.target.value)} style={{...iSty,fontSize:13,padding:"8px 11px"}} autoFocus/>}
             <div style={{display:"flex",gap:6}}>
               <input type="number" value={task.duration} min={1} max={120}
                 onChange={e=>onUpdate("duration",Number(e.target.value))}
-                style={{...iSty,width:60,fontSize:12,padding:"7px",color:"#FFE66D"}}/>
-              <select value={task.type} onChange={e=>onUpdate("type",e.target.value)}
-                style={{...iSty,flex:1,fontSize:11,padding:"7px",color:tc}}>
+                style={{...iSty,width:64,fontSize:13,padding:"8px",color:"#FFE66D"}} autoFocus={isWait}/>
+              {!isWait&&<select value={task.type} onChange={e=>onUpdate("type",e.target.value)}
+                style={{...iSty,flex:1,fontSize:12,padding:"8px",color:tc}}>
                 {taskTypes.map(t=><option key={t.name} value={t.name}>{t.name}</option>)}
-              </select>
+              </select>}
+              {isWait&&<span style={{flex:1,fontSize:11,color:WAIT_COLOR,display:"flex",alignItems:"center",letterSpacing:"0.06em"}}>⏸ DOWNTIME (min)</span>}
               <Btn onClick={()=>setEditing(false)} color="#4ECDC4" sm>✓</Btn>
             </div>
           </div>
         ):(
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
-                <Pill color={tc}>{task.type}</Pill>
-                {isDone&&<span style={{fontSize:9,color:"#00B894",fontWeight:700}}>✓ DONE</span>}
-                {isActive&&<span style={{fontSize:9,color:tc,animation:"blink 1s infinite",fontWeight:700}}>● ACTIVE</span>}
+              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4,flexWrap:"wrap"}}>
+                {isWait
+                  ? <Pill color={WAIT_COLOR}>⏸ WAITING</Pill>
+                  : <Pill color={tc}>{task.type}</Pill>}
+                {isDone&&<span style={{fontSize:9,color:"#00D9A3",fontWeight:700}}>✓ DONE</span>}
+                {isActive&&<span style={{fontSize:9,color:tc,animation:"blink 1s infinite",fontWeight:700}}>● {isWait?"IDLE":"ACTIVE"}</span>}
               </div>
-              <div style={{fontSize:12,color:isDone?"#3a4a3a":"#E2E8F0",lineHeight:1.4,wordBreak:"break-word"}}>{task.name}</div>
+              <div style={{fontSize:13,color:isWait?"#9aa4b8":(isDone?"#6a7a6a":"#F0F4FA"),lineHeight:1.4,wordBreak:"break-word",fontWeight:500,fontStyle:isWait?"italic":"normal"}}>{task.name}</div>
             </div>
-            <span style={{fontSize:14,fontWeight:800,color:"#FFE66D",minWidth:32,textAlign:"right",flexShrink:0}}>{task.duration}m</span>
-            <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
-              <button onClick={()=>setEditing(true)} style={{...iconBtnSty,fontSize:13}} title="Edit">✎</button>
-              <button onClick={onDelete} style={{...iconBtnSty,fontSize:13,color:"#6a2020"}} title="Delete">✕</button>
+            <span style={{fontSize:15,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",minWidth:34,textAlign:"right",flexShrink:0}}>{task.duration}m</span>
+            <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+              <button onClick={()=>setEditing(true)} style={{...iconBtnSty,fontSize:14,color:"#8a94a8"}} title="Edit">✎</button>
+              <button onClick={onDelete} style={{...iconBtnSty,fontSize:14,color:"#9a4040"}} title="Delete">✕</button>
             </div>
           </div>
         )}
@@ -581,7 +653,7 @@ function ProjectCard({p, onOpen, onDelete, onDuplicate, onMoveToFolder, folders,
 
 function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject,
   onDuplicateProject, onMoveToFolder, onCreateFolder, onDeleteFolder, onRenameFolder,
-  saveIndicator, syncing, onRefresh, dbReady}) {
+  saveIndicator, syncing, onRefresh, dbReady, onStartDemo}) {
   const [showContinue, setShowContinue] = useState(false);
   const [openFolders,  setOpenFolders]  = useState({}); // folderId -> bool
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -590,6 +662,7 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
   const [newFolderColor,setNewFolderColor]= useState("#FF6B35");
   const [renamingFolder,setRenamingFolder]= useState(null);
   const [renameVal,     setRenameVal]     = useState("");
+  const [showTutorialAsk, setShowTutorialAsk] = useState(false);
 
   function toggleFolder(id) { setOpenFolders(s=>({...s,[id]:!s[id]})); }
 
@@ -603,7 +676,7 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
   }
 
   return (
-    <div style={{minHeight:"100vh",background:"#080A0F",color:"#E2E8F0",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
+    <div style={{minHeight:"100vh",background:"#0B0E15",color:"#E8EDF5",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
       <style>{globalCSS}</style>
       {/* Nav */}
       <div style={{padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #1E2130"}}>
@@ -627,8 +700,43 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
             style={{padding:"15px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,14px)",border:"1px solid #2A2D3A",boxShadow:"none"}}>
             {showContinue?"▲ HIDE PROJECTS":"◈ CONTINUE A PROJECT"}
           </Btn>
+          <Btn onClick={()=>setShowTutorialAsk(true)} color="#12141C" text="#4ECDC4" full
+            style={{padding:"15px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,14px)",border:"1px solid #4ECDC444",boxShadow:"none"}}>
+            🎓 TUTORIAL / TEST
+          </Btn>
         </div>
       </div>
+
+      {/* Tutorial ask modal */}
+      {showTutorialAsk&&(
+        <div style={{position:"fixed",inset:0,background:"#000d",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+          onClick={()=>setShowTutorialAsk(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#11141D",border:"1px solid #4ECDC444",borderRadius:16,width:"100%",maxWidth:420,padding:"28px 26px",textAlign:"center"}}>
+            <div style={{fontSize:36,marginBottom:10}}>🎓</div>
+            <div style={{fontSize:18,fontWeight:800,color:"#FFF",marginBottom:8}}>Tutorial / Test</div>
+            <div style={{fontSize:13,color:"#9aa4b8",lineHeight:1.6,marginBottom:6}}>
+              Would you like to be guided through all the functions?
+            </div>
+            <div style={{fontSize:11,color:"#5a6478",lineHeight:1.6,marginBottom:22}}>
+              This opens a demo "Tea &amp; Toast" changeover. Nothing is saved — it resets for the next person when you leave.
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(true);}} color="#4ECDC4" full
+                style={{padding:"13px",borderRadius:10}}>
+                ✓ YES — GUIDE ME THROUGH IT
+              </Btn>
+              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(false);}} color="#FF6B35" full
+                style={{padding:"13px",borderRadius:10}}>
+                ✗ NO — JUST LET ME PLAY
+              </Btn>
+              <button onClick={()=>setShowTutorialAsk(false)}
+                style={{background:"transparent",border:"none",color:"#5a6478",fontFamily:"inherit",fontSize:11,cursor:"pointer",padding:"6px",letterSpacing:"0.08em"}}>
+                CANCEL
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Project Library */}
       {showContinue&&(
@@ -772,7 +880,7 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN APP
 // ─────────────────────────────────────────────────────────────────────────────
-export default function SMEDApp() {
+function SMEDAppInner() {
   const [projects,setProjects]   = useState([]);
   const [folders, setFolders]    = useState([]);
   const [activeId,setActiveId]   = useState(null);
@@ -799,8 +907,11 @@ export default function SMEDApp() {
   const [importMsg,setImportMsg]             = useState("");
   const ganttRef  = useRef(null);
   const xlsxReady = useRef(false);
+  const [demoProject,setDemoProject] = useState(null); // holds the temporary demo board
+  const [tutorialStep,setTutorialStep] = useState(null); // null = no tutorial, 0+ = step index
 
-  const activeProject = projects.find(p=>p.id===activeId)||null;
+  // activeProject is either the demo (if active) or a real saved project
+  const activeProject = demoProject || projects.find(p=>p.id===activeId)||null;
   const operators = activeProject?.operators||[];
   const taskTypes = activeProject?.taskTypes||DEFAULT_TASK_TYPES;
   const maxTime = operators.length>0?Math.max(...operators.map(o=>o.tasks.reduce((s,t)=>s+t.duration,0)),1):1;
@@ -886,6 +997,11 @@ export default function SMEDApp() {
 
   // ── helpers: write to Supabase + update local state ──────────────────────────
   function mutateProject(id,fn) {
+    // Demo board: mutate in memory only, never touch DB
+    if (demoProject && id === demoProject.id) {
+      setDemoProject(p => ({...p, ...fn(p)}));
+      return;
+    }
     setProjects(ps => {
       const next = ps.map(p => p.id===id ? {...p,...fn(p)} : p);
       const updated = next.find(p=>p.id===id);
@@ -894,7 +1010,27 @@ export default function SMEDApp() {
       return next;
     });
   }
-  function mutateOps(fn) { mutateProject(activeId,p=>({operators:fn(p.operators)})); }
+  function mutateOps(fn) {
+    if (demoProject) { setDemoProject(p=>({...p, operators:fn(p.operators)})); return; }
+    mutateProject(activeId,p=>({operators:fn(p.operators)}));
+  }
+
+  // ── tutorial / demo ───────────────────────────────────────────────────────────
+  function startDemo(withTutorial) {
+    const demo = makeDemoProject();
+    setDemoProject(demo);
+    setActiveId(null);
+    setView("board"); setPhase("plan"); resetRun();
+    setNewTask({name:"",duration:5,type:demo.taskTypes[0]?.name||""});
+    setTutorialStep(withTutorial ? 0 : null);
+    setScreen("board");
+  }
+  function exitDemo() {
+    setDemoProject(null);
+    setTutorialStep(null);
+    setScreen("home");
+    resetRun();
+  }
 
   // ── folder management ─────────────────────────────────────────────────────────
   function createFolder(f) {
@@ -1003,6 +1139,9 @@ export default function SMEDApp() {
     });
     mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:[...o.tasks,...mapped]}));
     setShowTemplPicker(null);
+  }
+  function addWait(opId) {
+    mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:[...o.tasks, makeWait(5)]}));
   }
   function deleteTask(opId,taskId)     { mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:o.tasks.filter(t=>t.id!==taskId)})); }
   function updateTask(opId,taskId,f,v) { mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:o.tasks.map(t=>t.id!==taskId?t:{...t,[f]:f==="duration"?Number(v):v})})); }
@@ -1221,25 +1360,27 @@ export default function SMEDApp() {
         op.tasks.forEach(task => {
           const ty = TOP + (cursor / totalMin) * chartH;
           const th = (task.duration / totalMin) * chartH;
-          const tt = taskTypes.find(t => t.name === task.type) || { color:"#999999" };
+          const isWait = task.isWait;
+          const tt = isWait ? { color: WAIT_COLOR } : (taskTypes.find(t => t.name === task.type) || { color:"#999999" });
           const tc = tt.color;
           const tr2 = parseInt(tc.slice(1,3),16);
           const tg2 = parseInt(tc.slice(3,5),16);
           const tb2 = parseInt(tc.slice(5,7),16);
 
-          // block fill
-          doc.setFillColor(tr2, tg2, tb2, 0.5);
+          // block fill (waits are lighter/dashed-look)
+          doc.setFillColor(tr2, tg2, tb2, isWait ? 0.25 : 0.5);
           doc.setDrawColor(tr2, tg2, tb2);
-          doc.setLineWidth(0.3);
+          doc.setLineWidth(isWait ? 0.5 : 0.3);
           doc.roundedRect(x + 1, ty + 0.5, colW - 2, Math.max(th - 1, 1.5), 1, 1, "FD");
 
           // task name (clip to block height)
           if (th > 4) {
-            doc.setFont("helvetica","normal");
+            doc.setFont("helvetica", isWait ? "italic" : "normal");
             doc.setFontSize(Math.min(6.5, th * 0.5));
             doc.setTextColor(255, 255, 255);
             const maxChars = Math.floor((colW - 4) / 1.8);
-            const label = task.name.length > maxChars ? task.name.slice(0, maxChars - 1) + "…" : task.name;
+            const rawLabel = isWait ? "Waiting" : task.name;
+            const label = rawLabel.length > maxChars ? rawLabel.slice(0, maxChars - 1) + "…" : rawLabel;
             doc.text(label, x + 2.5, ty + Math.min(th * 0.45, 4));
           }
           if (th > 7) {
@@ -1498,7 +1639,8 @@ create policy "public_all_projects" on projects
           onOpenProject={openProject} onDeleteProject={deleteProject} onDuplicateProject={duplicateProject}
           onMoveToFolder={moveToFolder} onCreateFolder={createFolder}
           onDeleteFolder={deleteFolder} onRenameFolder={renameFolder}
-          saveIndicator={saveIndicator} syncing={syncing} onRefresh={manualRefresh} dbReady={dbReady}/>
+          saveIndicator={saveIndicator} syncing={syncing} onRefresh={manualRefresh} dbReady={dbReady}
+          onStartDemo={startDemo}/>
       </div>
     </>
   );
@@ -1507,12 +1649,53 @@ create policy "public_all_projects" on projects
   if(!activeProject) return null;
 
   return (
-    <div style={{minHeight:"100vh",background:"#080A0F",color:"#E2E8F0",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
+    <div style={{minHeight:"100vh",background:"#0B0E15",color:"#E8EDF5",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
       <style>{globalCSS}</style>
       {showReport&&<ReportPanel operators={operators} taskTypes={taskTypes} onClose={()=>setShowReport(false)}/>}
 
+      {/* DEMO mode banner */}
+      {demoProject&&(
+        <div style={{background:"linear-gradient(90deg,#0a2a28,#11141D)",borderBottom:"1px solid #4ECDC444",padding:"8px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+          <span style={{fontSize:11,color:"#4ECDC4",fontWeight:700,letterSpacing:"0.06em"}}>🎓 DEMO MODE</span>
+          <span style={{fontSize:10,color:"#8aa4a8",flex:1}}>Play freely — nothing is saved. Leaving resets it for the next person.</span>
+          {tutorialStep===null && (
+            <button onClick={()=>setTutorialStep(0)} style={{...iconBtnSty,fontSize:10,color:"#4ECDC4",background:"#4ECDC422",border:"1px solid #4ECDC444",borderRadius:5,padding:"4px 10px",letterSpacing:"0.06em"}}>▶ START GUIDE</button>
+          )}
+        </div>
+      )}
+
+      {/* Tutorial walkthrough overlay */}
+      {tutorialStep!==null && TUTORIAL_STEPS[tutorialStep] && (
+        <div style={{position:"fixed",bottom:0,left:0,right:0,zIndex:250,display:"flex",justifyContent:"center",padding:"0 12px 16px",pointerEvents:"none"}}>
+          <div style={{background:"#11141D",border:"2px solid #4ECDC4",borderRadius:14,maxWidth:440,width:"100%",padding:"16px 18px",boxShadow:"0 8px 40px #000a, 0 0 24px #4ECDC433",pointerEvents:"auto",animation:"fadeIn 0.25s ease"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontSize:9,color:"#4ECDC4",letterSpacing:"0.14em",fontWeight:700}}>STEP {tutorialStep+1} OF {TUTORIAL_STEPS.length}</span>
+              <button onClick={()=>setTutorialStep(null)} style={{...iconBtnSty,fontSize:11,color:"#5a6478",letterSpacing:"0.08em"}}>SKIP GUIDE ✕</button>
+            </div>
+            {/* progress dots */}
+            <div style={{display:"flex",gap:3,marginBottom:12}}>
+              {TUTORIAL_STEPS.map((_,i)=>(
+                <div key={i} style={{flex:1,height:3,borderRadius:2,background:i<=tutorialStep?"#4ECDC4":"#2E3445",transition:"background 0.3s"}}/>
+              ))}
+            </div>
+            <div style={{fontSize:16,fontWeight:800,color:"#FFF",marginBottom:6}}>{TUTORIAL_STEPS[tutorialStep].title}</div>
+            <div style={{fontSize:12,color:"#C0C8D8",lineHeight:1.6,marginBottom:16}}>{TUTORIAL_STEPS[tutorialStep].body}</div>
+            <div style={{display:"flex",gap:8}}>
+              {tutorialStep>0 && (
+                <Btn onClick={()=>setTutorialStep(s=>s-1)} color="#252A38" text="#C0C8D8" sm style={{flex:1}}>← BACK</Btn>
+              )}
+              {tutorialStep<TUTORIAL_STEPS.length-1 ? (
+                <Btn onClick={()=>setTutorialStep(s=>s+1)} color="#4ECDC4" sm style={{flex:2}}>NEXT →</Btn>
+              ) : (
+                <Btn onClick={()=>setTutorialStep(null)} color="#FF6B35" sm style={{flex:2}}>✓ FINISH GUIDE</Btn>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DB error banner */}
-      {dbError&&(
+      {dbError&&!demoProject&&(
         <div style={{background:"#2a0a0a",borderBottom:"1px solid #6a2020",padding:"8px 16px",display:"flex",alignItems:"center",gap:10}}>
           <span style={{fontSize:11,color:"#E17055"}}>⚠ {dbError}</span>
           <button onClick={manualRefresh} style={{...iconBtnSty,fontSize:10,color:"#E17055",background:"#6a202033",border:"1px solid #6a2020",borderRadius:5,padding:"4px 10px",letterSpacing:"0.08em",marginLeft:"auto"}}>{syncing?"…":"RETRY"}</button>
@@ -1645,13 +1828,13 @@ create policy "public_all_projects" on projects
       )}
 
       {/* ── HEADER ── */}
-      <div style={{background:"#0D0F14",borderBottom:"1px solid #1E2130",padding:"10px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,gap:8,flexWrap:"wrap"}}>
+      <div style={{background:"#11141D",borderBottom:"1px solid #252A38",padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <button onClick={()=>setScreen("home")} style={{...iconBtnSty,fontSize:11,color:"#4a5568",letterSpacing:"0.1em",padding:"6px 8px",background:"#12141C",border:"1px solid #1E2130",borderRadius:6}}>
+          <button onClick={()=>{ if(demoProject){exitDemo();} else {setScreen("home");} }} style={{...iconBtnSty,fontSize:12,color:"#C0C8D8",letterSpacing:"0.1em",padding:"7px 12px",background:"#1A1F2B",border:"1px solid #2E3445",borderRadius:7,fontWeight:600}}>
             ← HOME
           </button>
           <div style={{display:"none"}}><Logo/></div>
-          <div style={{fontSize:13,fontWeight:700,color:"#FFF",letterSpacing:"0.04em",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          <div style={{fontSize:15,fontWeight:700,color:"#FFFFFF",letterSpacing:"0.03em",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
             {activeProject.folderId && folders.find(f=>f.id===activeProject.folderId) && (
               <span style={{color:folders.find(f=>f.id===activeProject.folderId).color,fontSize:10,marginRight:6}}>
                 {folders.find(f=>f.id===activeProject.folderId).icon} {folders.find(f=>f.id===activeProject.folderId).name} ›
@@ -1680,21 +1863,22 @@ create policy "public_all_projects" on projects
       </div>
 
       {/* ── STATS BAR ── */}
-      <div style={{display:"flex",background:"#0D0F14",borderBottom:"1px solid #1E2130",overflowX:"auto",flexShrink:0}}>
+      <div style={{display:"flex",background:"#11141D",borderBottom:"1px solid #252A38",overflowX:"auto",flexShrink:0}}>
         {[
-          ["OPS",operators.length,"#4ECDC4"],
-          ["TASKS",operators.reduce((s,o)=>s+o.tasks.length,0),"#FFE66D"],
-          ["MAX",maxTime+"m","#FF6B35"],
-          ["EFF",efficiency+"%",efficiency>85?"#00B894":efficiency>60?"#FFE66D":"#E17055"],
+          ["OPERATORS",operators.length,"#4ECDC4"],
+          ["TASKS",operators.reduce((s,o)=>s+o.tasks.length,0),"#FFD93D"],
+          ["MAX TIME",maxTime+"m","#FF6B35"],
+          ["EFFICIENCY",efficiency+"%",efficiency>85?"#00D9A3":efficiency>60?"#FFD93D":"#E17055"],
         ].map(([l,v,c])=>(
-          <div key={l} style={{padding:"8px 16px",borderRight:"1px solid #1E2130",flexShrink:0}}>
-            <div style={{fontSize:7,color:"#4a5568",letterSpacing:"0.16em"}}>{l}</div>
-            <div style={{fontSize:15,fontWeight:800,color:c}}>{v}</div>
+          <div key={l} style={{padding:"10px 20px",borderRight:"1px solid #252A38",flexShrink:0}}>
+            <div style={{fontSize:9,color:"#8a94a8",letterSpacing:"0.14em",fontWeight:600}}>{l}</div>
+            <div style={{fontSize:18,fontWeight:800,color:c}}>{v}</div>
           </div>
         ))}
-        <div style={{flex:1,padding:"8px 14px",display:"flex",flexDirection:"column",justifyContent:"center",minWidth:80}}>
-          <div style={{background:"#1A1D26",borderRadius:2,height:5,overflow:"hidden"}}>
-            <div style={{width:efficiency+"%",height:"100%",background:`linear-gradient(90deg,#FF6B35,${efficiency>85?"#00B894":"#FFE66D"})`,transition:"width 0.4s ease"}}/>
+        <div style={{flex:1,padding:"10px 18px",display:"flex",flexDirection:"column",justifyContent:"center",minWidth:100}}>
+          <div style={{fontSize:8,color:"#8a94a8",letterSpacing:"0.14em",marginBottom:4,fontWeight:600}}>LOAD BALANCE</div>
+          <div style={{background:"#252A38",borderRadius:3,height:7,overflow:"hidden"}}>
+            <div style={{width:efficiency+"%",height:"100%",background:`linear-gradient(90deg,#FF6B35,${efficiency>85?"#00D9A3":"#FFD93D"})`,transition:"width 0.4s ease"}}/>
           </div>
         </div>
       </div>
@@ -1725,42 +1909,42 @@ create policy "public_all_projects" on projects
       )}
 
       {/* ── NOTES BAR ── */}
-      <div style={{background:"#0D0F14",borderBottom:"1px solid #1E2130",padding:"6px 16px",display:"flex",alignItems:"center",gap:8}}>
-        <span style={{fontSize:9,color:"#2A2D3A",flexShrink:0}}>📝</span>
+      <div style={{background:"#11141D",borderBottom:"1px solid #252A38",padding:"8px 18px",display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:11,color:"#8a94a8",flexShrink:0}}>📝</span>
         <input value={activeProject.notes||""} onChange={e=>updateNotes(e.target.value)}
           placeholder="Add notes, shift info, machine number…"
-          style={{...iSty,border:"none",background:"transparent",fontSize:11,padding:"3px 4px",color:"#6a7080"}}/>
+          style={{...iSty,border:"none",background:"transparent",fontSize:13,padding:"3px 4px",color:"#C0C8D8"}}/>
       </div>
 
       {/* ── CONTENT ── */}
-      <div style={{flex:1,overflowY:"auto",padding:"14px 12px"}}>
+      <div style={{flex:1,overflowY:"auto",padding:"18px 18px",background:"#0B0E15"}}>
 
         {/* ══ BOARD VIEW ══ */}
         {view==="board"&&(
-          <div style={{display:"flex",gap:10,overflowX:"auto",paddingBottom:12,alignItems:"flex-start"}}>
+          <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:12,alignItems:"stretch",minHeight:"calc(100vh - 220px)"}}>
             {operators.map((op,opIdx)=>{
               const opTime=op.tasks.reduce((s,t)=>s+t.duration,0);
               const isBottleneck=opTime===maxTime&&maxTime>1&&op.tasks.length>0;
               let taskCursor=0;
               return (
-                <div key={op.id} style={{minWidth:200,maxWidth:230,flexShrink:0,background:"#0D0F14",border:`1px solid ${isBottleneck?"#FF6B3544":"#1E2130"}`,borderRadius:10,overflow:"hidden",boxShadow:isBottleneck?"0 0 14px #FF6B3514":"none",transition:"border-color 0.3s"}}>
+                <div key={op.id} style={{flex:operators.length<=5?"1 1 0":"0 0 260px",minWidth:240,maxWidth:operators.length<=5?"none":340,display:"flex",flexDirection:"column",background:"#11141D",border:`1px solid ${isBottleneck?"#FF6B3566":"#252A38"}`,borderRadius:12,overflow:"hidden",boxShadow:isBottleneck?"0 0 18px #FF6B3522":"0 2px 8px #00000033",transition:"border-color 0.3s"}}>
                   {/* op header */}
-                  <div style={{padding:"9px 11px",background:OP_COLORS[opIdx%10]+"14",borderBottom:"1px solid #1E2130",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:6}}>
-                      <div style={{width:7,height:7,borderRadius:"50%",background:OP_COLORS[opIdx%10],flexShrink:0}}/>
+                  <div style={{padding:"12px 14px",background:OP_COLORS[opIdx%10]+"22",borderBottom:`1px solid ${OP_COLORS[opIdx%10]}33`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <div style={{width:9,height:9,borderRadius:"50%",background:OP_COLORS[opIdx%10],flexShrink:0,boxShadow:`0 0 6px ${OP_COLORS[opIdx%10]}`}}/>
                       <input value={op.name} onChange={e=>updateOpName(op.id,e.target.value)}
-                        style={{background:"transparent",border:"none",color:"#FFF",fontFamily:"inherit",fontSize:11,fontWeight:700,letterSpacing:"0.04em",outline:"none",width:90}}/>
+                        style={{background:"transparent",border:"none",color:"#FFFFFF",fontFamily:"inherit",fontSize:14,fontWeight:700,letterSpacing:"0.03em",outline:"none",width:130}}/>
                     </div>
-                    <div style={{display:"flex",alignItems:"center",gap:5}}>
-                      {isBottleneck&&<span style={{fontSize:7,color:"#FF6B35",background:"#FF6B3514",padding:"1px 4px",borderRadius:2}}>SLOW</span>}
-                      <span style={{fontSize:11,fontWeight:800,color:OP_COLORS[opIdx%10]}}>{opTime}m</span>
-                      {operators.length>1&&<button onClick={()=>removeOperator(op.id)} style={{...iconBtnSty,color:"#6a2020",fontSize:10}}>✕</button>}
+                    <div style={{display:"flex",alignItems:"center",gap:7}}>
+                      {isBottleneck&&<span style={{fontSize:8,color:"#FFF",background:"#FF6B35",padding:"2px 6px",borderRadius:3,fontWeight:700,letterSpacing:"0.06em"}}>SLOW</span>}
+                      <span style={{fontSize:15,fontWeight:800,color:OP_COLORS[opIdx%10]}}>{opTime}m</span>
+                      {operators.length>1&&<button onClick={()=>removeOperator(op.id)} style={{...iconBtnSty,color:"#8a3030",fontSize:12}}>✕</button>}
                     </div>
                   </div>
                   {phase==="run"&&<div style={{background:"#1A1D26",height:2}}><div style={{width:Math.min((runMinutes/(opTime||1))*100,100)+"%",height:"100%",background:OP_COLORS[opIdx%10],transition:"width 0.08s linear"}}/></div>}
 
                   {/* tasks */}
-                  <div style={{padding:"8px",minHeight:150}} data-opid={op.id}
+                  <div style={{padding:"10px",flex:1,minHeight:160}} data-opid={op.id}
                     onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
                     onDrop={e=>onDrop(e,op.id,op.tasks.length)}
                     onTouchMove={onTouchMove}
@@ -1773,45 +1957,53 @@ create policy "public_all_projects" on projects
                     <div data-opid={op.id} data-tidx={op.tasks.length}
                       onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
                       onDrop={e=>onDrop(e,op.id,op.tasks.length)}
-                      style={{height:24,border:"1px dashed",borderColor:dragOver?.opId===op.id&&dragOver?.index===op.tasks.length?"#4ECDC4":"#1E2130",borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,color:"#1E2130",transition:"all 0.2s"}}>
+                      style={{height:30,border:"1px dashed",borderColor:dragOver?.opId===op.id&&dragOver?.index===op.tasks.length?"#4ECDC4":"#3A4150",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#5a6478",letterSpacing:"0.1em",transition:"all 0.2s"}}>
                       DROP HERE
                     </div>
                   </div>
 
                   {/* add/template */}
-                  <div style={{padding:"0 8px 8px",display:"flex",flexDirection:"column",gap:5}}>
+                  <div style={{padding:"0 10px 10px",display:"flex",flexDirection:"column",gap:6}}>
                     {showAddTask===op.id?(
-                      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                      <div style={{display:"flex",flexDirection:"column",gap:6}}>
                         <input placeholder="Task name…" value={newTask.name} onChange={e=>setNewTask(n=>({...n,name:e.target.value}))}
-                          onKeyDown={e=>e.key==="Enter"&&addTask(op.id)} style={{...iSty,fontSize:11,padding:"7px 9px"}} autoFocus/>
-                        <div style={{display:"flex",gap:5}}>
+                          onKeyDown={e=>e.key==="Enter"&&addTask(op.id)} style={{...iSty,fontSize:13,padding:"9px 11px"}} autoFocus/>
+                        <div style={{display:"flex",gap:6}}>
                           <input type="number" value={newTask.duration} min={1} max={120}
                             onChange={e=>setNewTask(n=>({...n,duration:Number(e.target.value)}))}
-                            style={{...iSty,width:50,fontSize:11,padding:"7px",color:"#FFE66D"}}/>
+                            style={{...iSty,width:58,fontSize:13,padding:"9px",color:"#FFE66D"}}/>
                           <select value={newTask.type} onChange={e=>setNewTask(n=>({...n,type:e.target.value}))}
-                            style={{...iSty,flex:1,fontSize:10,padding:"7px",color:taskTypes.find(t=>t.name===newTask.type)?.color||"#E2E8F0"}}>
+                            style={{...iSty,flex:1,fontSize:12,padding:"9px",color:taskTypes.find(t=>t.name===newTask.type)?.color||"#E2E8F0"}}>
                             {taskTypes.map(t=><option key={t.name} value={t.name}>{t.name}</option>)}
                           </select>
                         </div>
-                        <div style={{display:"flex",gap:5}}>
+                        <div style={{display:"flex",gap:6}}>
                           <Btn onClick={()=>addTask(op.id)} color="#FF6B35" sm style={{flex:1}}>ADD</Btn>
-                          <Btn onClick={()=>setShowAddTask(null)} color="#1E2130" text="#9CA3AF" sm>✕</Btn>
+                          <Btn onClick={()=>setShowAddTask(null)} color="#252A38" text="#C0C8D8" sm>✕</Btn>
                         </div>
                       </div>
                     ):(
                       <button onClick={()=>setShowAddTask(op.id)}
-                        style={{width:"100%",padding:"5px",background:"transparent",border:"1px dashed #1E2130",color:"#2A2D3A",fontFamily:"inherit",fontSize:9,cursor:"pointer",borderRadius:6,letterSpacing:"0.06em",transition:"all 0.2s"}}
+                        style={{width:"100%",padding:"8px",background:"#1A1F2B",border:"1px dashed #3A4150",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.borderColor="#FF6B35";e.target.style.color="#FF6B35";}}
-                        onMouseLeave={e=>{e.target.style.borderColor="#1E2130";e.target.style.color="#2A2D3A";}}>
+                        onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
                         + ADD TASK
                       </button>
                     )}
-                    <button onClick={()=>setShowTemplPicker(op.id)}
-                      style={{width:"100%",padding:"5px",background:"transparent",border:"1px dashed #1E2130",color:"#2A2D3A",fontFamily:"inherit",fontSize:9,cursor:"pointer",borderRadius:6,letterSpacing:"0.06em",transition:"all 0.2s"}}
-                      onMouseEnter={e=>{e.target.style.borderColor="#4ECDC4";e.target.style.color="#4ECDC4";}}
-                      onMouseLeave={e=>{e.target.style.borderColor="#1E2130";e.target.style.color="#2A2D3A";}}>
-                      ⊞ TEMPLATE
-                    </button>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>setShowTemplPicker(op.id)}
+                        style={{flex:1,padding:"8px",background:"#1A1F2B",border:"1px dashed #3A4150",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
+                        onMouseEnter={e=>{e.target.style.borderColor="#4ECDC4";e.target.style.color="#4ECDC4";}}
+                        onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
+                        ⊞ TEMPLATE
+                      </button>
+                      <button onClick={()=>addWait(op.id)} title="Add waiting / downtime block"
+                        style={{flex:1,padding:"8px",background:"#1A1F2B",border:"1px dashed #4a5160",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
+                        onMouseEnter={e=>{e.target.style.borderColor=WAIT_COLOR;e.target.style.color="#b0b8c8";}}
+                        onMouseLeave={e=>{e.target.style.borderColor="#4a5160";e.target.style.color="#8a94a8";}}>
+                        ⏸ ADD WAIT
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -1907,7 +2099,8 @@ create policy "public_all_projects" on projects
                       const isActive = phase==="run"&&runMinutes>=cursor&&runMinutes<cursor+task.duration;
                       const isDone   = phase==="run"&&runMinutes>=cursor+task.duration;
                       cursor+=task.duration;
-                      const tc=(taskTypes.find(t=>t.name===task.type)||{color:"#aaa"}).color;
+                      const isWait = task.isWait;
+                      const tc= isWait ? WAIT_COLOR : (taskTypes.find(t=>t.name===task.type)||{color:"#aaa"}).color;
                       const isDraggingThis = dragging?.taskId===task.id;
                       return (
                         <div key={task.id}
@@ -1924,8 +2117,10 @@ create policy "public_all_projects" on projects
                             top:`calc(${topPct}% + 1px)`,
                             height:`calc(${heightPct}% - 2px)`,
                             left:2,right:2,
-                            background:isDone?tc+"22":isActive?tc:isDraggingThis?tc+"44":tc+"66",
-                            border:`1px solid ${tc}`,
+                            background:isWait
+                              ? `repeating-linear-gradient(45deg, ${tc}44, ${tc}44 5px, ${tc}22 5px, ${tc}22 10px)`
+                              : (isDone?tc+"22":isActive?tc:isDraggingThis?tc+"44":tc+"66"),
+                            border:`1px ${isWait?"dashed":"solid"} ${tc}`,
                             borderRadius:5,
                             overflow:"hidden",
                             cursor:"grab",
@@ -1938,8 +2133,8 @@ create policy "public_all_projects" on projects
                             zIndex:5,
                             opacity:isDraggingThis?0.4:1,
                           }}>
-                          <div style={{fontSize:9,color:isDone?tc+"88":"#FFF",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.2}}>{task.name}</div>
-                          <div style={{fontSize:8,color:isDone?tc+"66":tc,marginTop:1}}>{task.duration}m</div>
+                          <div style={{fontSize:9,color:isWait?"#b0b8c8":(isDone?tc+"88":"#FFF"),fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.2,fontStyle:isWait?"italic":"normal"}}>{isWait?"⏸ Waiting":task.name}</div>
+                          <div style={{fontSize:8,color:isWait?"#b0b8c8":(isDone?tc+"66":tc),marginTop:1}}>{task.duration}m</div>
                           {isActive&&<div style={{position:"absolute",inset:0,background:tc+"22",animation:"pulse 1s infinite"}}/>}
                         </div>
                       );
@@ -1975,12 +2170,16 @@ create policy "public_all_projects" on projects
         )}
 
         {/* Type legend */}
-        <div style={{marginTop:10,padding:"8px 12px",background:"#0D0F14",border:"1px solid #1E2130",borderRadius:8,display:"flex",gap:10,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
-          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-            {taskTypes.map(tt=><div key={tt.name} style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:8,height:8,borderRadius:"50%",background:tt.color}}/><span style={{fontSize:9,color:"#4a5568"}}>{tt.name}</span></div>)}
+        <div style={{marginTop:14,padding:"10px 14px",background:"#11141D",border:"1px solid #252A38",borderRadius:8,display:"flex",gap:12,flexWrap:"wrap",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+            {taskTypes.map(tt=><div key={tt.name} style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:9,height:9,borderRadius:"50%",background:tt.color}}/><span style={{fontSize:10,color:"#C0C8D8"}}>{tt.name}</span></div>)}
+            <div style={{display:"flex",alignItems:"center",gap:5}}>
+              <div style={{width:9,height:9,borderRadius:2,background:`repeating-linear-gradient(45deg, ${WAIT_COLOR}, ${WAIT_COLOR} 2px, #181C24 2px, #181C24 4px)`,border:`1px solid ${WAIT_COLOR}`}}/>
+              <span style={{fontSize:10,color:"#C0C8D8"}}>⏸ Waiting / Downtime</span>
+            </div>
           </div>
-          <span style={{fontSize:8,color:"#2A2D3A"}}>Drag tasks to rebalance · Auto-saved</span>
-          {saveIndicator && <span style={{fontSize:8,color:"#00B894",animation:"fadeIn 0.2s ease"}}>✓ Saved</span>}
+          <span style={{fontSize:9,color:"#5a6478"}}>Drag tasks to rebalance · Auto-saved</span>
+          {saveIndicator && <span style={{fontSize:9,color:"#00D9A3",animation:"fadeIn 0.2s ease"}}>✓ Saved</span>}
         </div>
       </div>
     </div>
@@ -1988,6 +2187,65 @@ create policy "public_all_projects" on projects
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// PASSWORD GATE  (simple front-end lock — keeps casual visitors out)
+// ─────────────────────────────────────────────────────────────────────────────
+const SITE_PASSWORD = "AZMaccLean";
+const PW_SESSION_KEY = "smed_unlocked_v1";
+
+export default function SMEDApp() {
+  const [unlocked, setUnlocked] = useState(() => {
+    try { return sessionStorage.getItem(PW_SESSION_KEY) === "1"; } catch { return false; }
+  });
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState(false);
+
+  function submit() {
+    if (pw === SITE_PASSWORD) {
+      setUnlocked(true);
+      try { sessionStorage.setItem(PW_SESSION_KEY, "1"); } catch {}
+    } else {
+      setError(true);
+      setPw("");
+      setTimeout(() => setError(false), 1500);
+    }
+  }
+
+  if (unlocked) return <SMEDAppInner />;
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0B0E15",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono','Courier New',monospace",padding:24}}>
+      <style>{globalCSS}</style>
+      <div style={{width:"100%",maxWidth:340,textAlign:"center"}}>
+        <div style={{width:48,height:48,background:"linear-gradient(135deg,#FF6B35,#E17055)",borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:900,color:"#FFF",margin:"0 auto 16px",boxShadow:"0 4px 20px #FF6B3555"}}>S</div>
+        <div style={{fontSize:18,fontWeight:800,color:"#FFF",letterSpacing:"0.08em",marginBottom:4}}>SMED RUNNER</div>
+        <div style={{fontSize:10,color:"#5a6478",letterSpacing:"0.2em",marginBottom:28}}>ENTER PASSWORD TO CONTINUE</div>
+        <input
+          type="password"
+          value={pw}
+          onChange={e=>setPw(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&submit()}
+          placeholder="Password"
+          autoFocus
+          style={{
+            width:"100%",boxSizing:"border-box",background:"#11141D",
+            border:`1px solid ${error?"#E17055":"#2E3445"}`,
+            color:"#E8EDF5",fontFamily:"inherit",fontSize:15,padding:"13px 16px",
+            borderRadius:10,outline:"none",textAlign:"center",letterSpacing:"0.1em",
+            marginBottom:12,transition:"border-color 0.2s"
+          }}/>
+        {error && <div style={{fontSize:11,color:"#E17055",marginBottom:12,animation:"fadeIn 0.2s ease"}}>Incorrect password — try again</div>}
+        <button onClick={submit} style={{
+          width:"100%",padding:"13px",background:"#FF6B35",border:"none",color:"#0D0F14",
+          fontFamily:"inherit",fontSize:13,fontWeight:700,cursor:"pointer",borderRadius:10,
+          letterSpacing:"0.08em",boxShadow:"0 2px 12px #FF6B3544"
+        }}>UNLOCK →</button>
+        <div style={{fontSize:9,color:"#3a4150",marginTop:20,letterSpacing:"0.1em"}}>INTERNAL TOOL · AUTHORISED USERS ONLY</div>
+      </div>
+    </div>
+  );
+}
+
 const globalCSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500;700;800&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin:0; padding:0; }
