@@ -369,15 +369,26 @@ function ReportPanel({operators, taskTypes, onClose}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // TASK CARD
 // ─────────────────────────────────────────────────────────────────────────────
-function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,onTouchStart,onTouchMove,onTouchEnd,dragging,dragOver,tIdx,phase,runMinutes,taskStart,onDelete,onUpdate}) {
+function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,onTouchStart,onTouchMove,onTouchEnd,dragging,dragOver,tIdx,phase,runMinutes,taskStart,onDelete,onUpdate,onContextMenu,scaleMin}) {
   const [editing,setEditing] = useState(false);
   const isActive = phase==="run"&&runMinutes>=taskStart&&runMinutes<taskStart+task.duration;
   const isDone   = phase==="run"&&runMinutes>=taskStart+task.duration;
   const isDraggingThis = dragging?.taskId===task.id;
   const isDropTarget   = dragOver?.opId===opId&&dragOver?.index===tIdx;
   const isWait = task.isWait;
+  // proportional height: scaleMin px per minute, with a readable floor
+  const propHeight = scaleMin && !editing ? Math.max(46, task.duration*scaleMin) : undefined;
   const tt = isWait ? {name:"Waiting",color:WAIT_COLOR} : (taskTypes.find(t=>t.name===task.type)||taskTypes[0]||{name:"",color:"#aaa"});
   const tc = tt.color;
+  const lpTimer = useRef(null);
+  function handleTouchStartCombined(e){
+    // long-press 500ms (no move) → context menu; otherwise normal drag handler
+    const touch=e.touches[0];
+    const sx=touch.clientX, sy=touch.clientY;
+    lpTimer.current=setTimeout(()=>{ onContextMenu(opId,task.id,tIdx,sx,sy); if(navigator.vibrate)navigator.vibrate(20); },500);
+    onTouchStart(e,task.id,opId);
+  }
+  function clearLP(){ clearTimeout(lpTimer.current); }
   return (
     <>
       {isDropTarget&&<div data-opid={opId} data-tidx={tIdx} style={{height:4,background:"#4ECDC4",borderRadius:2,margin:"3px 0",boxShadow:"0 0 8px #4ECDC4"}}/>}
@@ -387,9 +398,10 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
         onDragOver={e=>onDragOver(e,opId,tIdx)}
         onDrop={e=>{e.stopPropagation();onDrop(e,opId,tIdx);}}
         onDragEnd={onDragEnd}
-        onTouchStart={e=>onTouchStart(e,task.id,opId)}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
+        onContextMenu={e=>{e.preventDefault();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}}
+        onTouchStart={handleTouchStartCombined}
+        onTouchMove={e=>{clearLP();onTouchMove(e);}}
+        onTouchEnd={e=>{clearLP();onTouchEnd(e);}}
         data-opid={opId}
         data-tidx={tIdx}
         style={{
@@ -399,7 +411,8 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
           border:`1px ${isWait?"dashed":"solid"} ${isActive?tc:isDone?"#2a4a2a":isDraggingThis?"#4ECDC4":isWait?"#4a5160":"#2E3445"}`,
           borderRadius:8,padding:"10px 12px",marginBottom:7,cursor:"grab",opacity:isDraggingThis?0.35:1,
           boxShadow:isActive?`0 0 14px ${tc}55`:isDraggingThis?"0 0 12px #4ECDC444":"0 1px 3px #00000040",
-          transition:"all 0.18s",userSelect:"none",touchAction:"none"
+          transition:"all 0.18s",userSelect:"none",touchAction:"none",
+          minHeight:propHeight, display:"flex", flexDirection:"column", justifyContent:"center"
         }}>
         {editing?(
           <div style={{display:"flex",flexDirection:"column",gap:6}}>
@@ -430,6 +443,7 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
             </div>
             <span style={{fontSize:15,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",minWidth:34,textAlign:"right",flexShrink:0}}>{task.duration}m</span>
             <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+              <button onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}} style={{...iconBtnSty,fontSize:15,color:"#8a94a8"}} title="More actions (or right-click)">⋮</button>
               <button onClick={()=>setEditing(true)} style={{...iconBtnSty,fontSize:14,color:"#8a94a8"}} title="Edit">✎</button>
               <button onClick={onDelete} style={{...iconBtnSty,fontSize:14,color:"#9a4040"}} title="Delete">✕</button>
             </div>
@@ -890,10 +904,12 @@ function SMEDAppInner() {
   const [showWizard,setShowWizard]   = useState(false);
   const [showReport,setShowReport]   = useState(false);
   const [showAddTask,setShowAddTask] = useState(null);
+  const [waitPrompt,setWaitPrompt]   = useState(null); // {opId,index,minutes} | null
+  const [ctxMenu,setCtxMenu]         = useState(null); // {opId,taskId,index,x,y} | null
   const [newTask,setNewTask]         = useState({name:"",duration:5,type:""});
   const [dragging,setDragging]       = useState(null);
   const [dragOver,setDragOver]       = useState(null);
-  const [view,setView]   = useState("board"); // board | gantt
+  const [view,setView]   = useState("board"); // single editable view
   const [phase,setPhase] = useState("plan");
   const [runTime,setRunTime] = useState(0);
   const [running,setRunning] = useState(false);
@@ -1139,8 +1155,23 @@ function SMEDAppInner() {
     mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:[...o.tasks,...mapped]}));
     setShowTemplPicker(null);
   }
-  function addWait(opId) {
-    mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:[...o.tasks, makeWait(5)]}));
+  // wait insertion: opens a prompt; target = {opId, index} where index is where to insert
+  function requestWait(opId, index=null) {
+    setWaitPrompt({ opId, index, minutes: 5 });
+    setCtxMenu(null);
+  }
+  function confirmWait(minutes) {
+    if (!waitPrompt) return;
+    const { opId, index } = waitPrompt;
+    const block = makeWait(Math.max(1, Math.round(minutes)));
+    mutateOps(ops=>ops.map(o=>{
+      if (o.id!==opId) return o;
+      const tasks=[...o.tasks];
+      if (index===null || index>=tasks.length) tasks.push(block);
+      else tasks.splice(index, 0, block);
+      return {...o, tasks};
+    }));
+    setWaitPrompt(null);
   }
   function deleteTask(opId,taskId)     { mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:o.tasks.filter(t=>t.id!==taskId)})); }
   function updateTask(opId,taskId,f,v) { mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,tasks:o.tasks.map(t=>t.id!==taskId?t:{...t,[f]:f==="duration"?Number(v):v})})); }
@@ -1652,6 +1683,68 @@ create policy "public_all_projects" on projects
       <style>{globalCSS}</style>
       {showReport&&<ReportPanel operators={operators} taskTypes={taskTypes} onClose={()=>setShowReport(false)}/>}
 
+      {/* Task context menu (right-click / long-press / ⋮) */}
+      {ctxMenu&&(
+        <>
+          <div onClick={()=>setCtxMenu(null)} onContextMenu={e=>{e.preventDefault();setCtxMenu(null);}}
+            style={{position:"fixed",inset:0,zIndex:340}}/>
+          <div style={{position:"fixed",zIndex:341,
+            left:Math.min(ctxMenu.x, (typeof window!=="undefined"?window.innerWidth:400)-200),
+            top:Math.min(ctxMenu.y, (typeof window!=="undefined"?window.innerHeight:600)-220),
+            background:"#0D0F14",border:"1px solid #2E3445",borderRadius:10,padding:6,minWidth:184,boxShadow:"0 8px 28px #000c"}}>
+            <div style={{fontSize:9,color:"#5a6478",letterSpacing:"0.12em",padding:"4px 8px"}}>TASK ACTIONS</div>
+            <button onClick={()=>requestWait(ctxMenu.opId, ctxMenu.index)}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.12)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left",marginBottom:3}}>
+              ⏸ Add wait ABOVE
+            </button>
+            <button onClick={()=>requestWait(ctxMenu.opId, ctxMenu.index+1)}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.12)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left"}}>
+              ⏸ Add wait BELOW
+            </button>
+            <div style={{height:1,background:"#252A38",margin:"5px 0"}}/>
+            <button onClick={()=>{ deleteTask(ctxMenu.opId,ctxMenu.taskId); setCtxMenu(null); }}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"transparent",color:"#d98",fontSize:11,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left"}}>
+              ✕ Delete task
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Wait minutes prompt */}
+      {waitPrompt&&(
+        <div style={{position:"fixed",inset:0,background:"#000d",zIndex:350,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+          onClick={()=>setWaitPrompt(null)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#11141D",border:"2px solid #FF6B35",borderRadius:16,width:"100%",maxWidth:300,padding:24,textAlign:"center",boxShadow:"0 8px 40px #000a, 0 0 24px #FF6B3533"}}>
+            <div style={{fontSize:30,marginBottom:8}}>⏸</div>
+            <div style={{fontSize:16,fontWeight:800,color:"#FFF",marginBottom:4}}>Add Waiting / Downtime</div>
+            <div style={{fontSize:11,color:"#8a94a8",marginBottom:18}}>How many minutes is this wait?</div>
+            <div style={{display:"flex",alignItems:"center",gap:10,justifyContent:"center",marginBottom:18}}>
+              <button onClick={()=>setWaitPrompt(p=>({...p,minutes:Math.max(1,p.minutes-1)}))}
+                style={{width:38,height:38,borderRadius:9,background:"#1A1F2B",border:"1px solid #2E3445",color:"#C0C8D8",fontSize:20,cursor:"pointer",fontFamily:"inherit"}}>−</button>
+              <div style={{background:"#0B0E15",border:"1px solid #FF6B35",borderRadius:10,padding:"6px 0",width:96,display:"flex",alignItems:"baseline",justifyContent:"center",gap:4}}>
+                <input type="number" min={1} max={240} value={waitPrompt.minutes}
+                  onChange={e=>setWaitPrompt(p=>({...p,minutes:Math.max(1,Number(e.target.value)||1)}))}
+                  onKeyDown={e=>e.key==="Enter"&&confirmWait(waitPrompt.minutes)}
+                  style={{width:50,background:"transparent",border:"none",outline:"none",fontSize:26,fontWeight:800,color:"#FF6B35",fontFamily:"inherit",textAlign:"right"}} autoFocus/>
+                <span style={{fontSize:12,color:"#8a94a8"}}>min</span>
+              </div>
+              <button onClick={()=>setWaitPrompt(p=>({...p,minutes:Math.min(240,p.minutes+1)}))}
+                style={{width:38,height:38,borderRadius:9,background:"#1A1F2B",border:"1px solid #2E3445",color:"#C0C8D8",fontSize:20,cursor:"pointer",fontFamily:"inherit"}}>+</button>
+            </div>
+            <div style={{display:"flex",gap:6,justifyContent:"center",marginBottom:18}}>
+              {[1,2,5,10,15].map(m=>(
+                <button key={m} onClick={()=>setWaitPrompt(p=>({...p,minutes:m}))}
+                  style={{fontSize:11,color:waitPrompt.minutes===m?"#0D0F14":"#C0C8D8",background:waitPrompt.minutes===m?"#FF6B35":"#1A1F2B",border:`1px solid ${waitPrompt.minutes===m?"#FF6B35":"#2E3445"}`,borderRadius:8,padding:"5px 11px",cursor:"pointer",fontFamily:"inherit",fontWeight:waitPrompt.minutes===m?700:400}}>{m}m</button>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>setWaitPrompt(null)} color="#252A38" text="#C0C8D8" sm style={{flex:1}}>CANCEL</Btn>
+              <Btn onClick={()=>confirmWait(waitPrompt.minutes)} color="#FF6B35" sm style={{flex:2}}>⏸ ADD WAIT</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* DEMO mode banner */}
       {demoProject&&(
         <div style={{background:"linear-gradient(90deg,#0a2a28,#11141D)",borderBottom:"1px solid #4ECDC444",padding:"8px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
@@ -1849,11 +1942,6 @@ create policy "public_all_projects" on projects
             {syncing?"⏳ SYNCING…":saveIndicator?"✓ SAVED":"↻ SYNC"}
           </button>
           <div style={{display:"flex",background:"#12141C",border:"1px solid #1E2130",borderRadius:6,overflow:"hidden"}}>
-            {[["board","⊞"],["gantt","▤"]].map(([v,l])=>(
-              <button key={v} onClick={()=>setView(v)} style={{padding:"6px 12px",fontSize:12,fontFamily:"inherit",background:view===v?"#FF6B35":"transparent",color:view===v?"#FFF":"#4a5568",border:"none",cursor:"pointer",transition:"all 0.15s"}}>{l}</button>
-            ))}
-          </div>
-          <div style={{display:"flex",background:"#12141C",border:"1px solid #1E2130",borderRadius:6,overflow:"hidden"}}>
             {[["plan","PLAN"],["run","▶ RUN"]].map(([v,l])=>(
               <button key={v} onClick={()=>{setPhase(v);resetRun();}} style={{padding:"6px 12px",fontSize:10,fontFamily:"inherit",background:phase===v?(v==="run"?"#4ECDC4":"#FF6B35"):"transparent",color:phase===v?"#0D0F14":"#4a5568",border:"none",cursor:"pointer",letterSpacing:"0.08em",fontWeight:phase===v?700:400,transition:"all 0.15s"}}>{l}</button>
             ))}
@@ -1882,7 +1970,27 @@ create policy "public_all_projects" on projects
         </div>
       </div>
 
-      {/* ── RUN BANNER ── */}
+      {/* ── PER-OPERATOR WORK / WAIT CHIPS ── */}
+      {operators.length>0&&(
+        <div style={{background:"#0D1018",borderBottom:"1px solid #252A38",padding:"9px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",overflowX:"auto"}}>
+          <span style={{fontSize:9,color:"#8a94a8",letterSpacing:"0.14em",flexShrink:0}}>PER OPERATOR</span>
+          {operators.map((op,opIdx)=>{
+            const workTime = op.tasks.filter(t=>!t.isWait).reduce((s,t)=>s+t.duration,0);
+            const waitTime = op.tasks.filter(t=>t.isWait).reduce((s,t)=>s+t.duration,0);
+            const opTotal = workTime+waitTime;
+            const isBottleneck = opTotal===maxTime && maxTime>1 && op.tasks.length>0;
+            return (
+              <div key={op.id} style={{display:"flex",alignItems:"center",gap:8,background:"#1A1F2B",border:`1px solid ${isBottleneck?"#FF6B3566":"#252A38"}`,borderRadius:14,padding:"5px 12px",flexShrink:0}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:OP_COLORS[opIdx%10]}}/>
+                <span style={{fontSize:11,color:"#FFF",fontWeight:600}}>{op.name}</span>
+                <span style={{fontSize:11,color:"#00D9A3",fontWeight:700}}>{workTime}m work</span>
+                <span style={{color:"#3a4150"}}>·</span>
+                <span style={{fontSize:11,color:waitTime>0?"#FF6B35":"#6B7280",fontWeight:700}}>{waitTime}m wait</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       {phase==="run"&&(
         <div style={{background:"#06100a",borderBottom:"1px solid #0d2a14",padding:"10px 16px",display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
           <div style={{fontSize:24,fontWeight:800,color:"#4ECDC4",letterSpacing:"0.04em",minWidth:60}}>
@@ -1913,6 +2021,12 @@ create policy "public_all_projects" on projects
         <input value={activeProject.notes||""} onChange={e=>updateNotes(e.target.value)}
           placeholder="Add notes, shift info, machine number…"
           style={{...iSty,border:"none",background:"transparent",fontSize:13,padding:"3px 4px",color:"#C0C8D8"}}/>
+      </div>
+
+      {/* ── HINT BAR ── */}
+      <div style={{background:"rgba(255,107,53,0.07)",borderBottom:"1px solid rgba(255,107,53,0.18)",padding:"6px 18px",display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:11}}>💡</span>
+        <span style={{fontSize:10,color:"#b89478"}}>Tip: <b style={{color:"#FF6B35"}}>right-click</b> (or <b style={{color:"#FF6B35"}}>long-press</b> on mobile, or tap <b style={{color:"#FF6B35"}}>⋮</b>) any task to insert a wait above or below it. Task height shows its duration.</span>
       </div>
 
       {/* ── CONTENT ── */}
@@ -1951,7 +2065,7 @@ create policy "public_all_projects" on projects
                   >
                     {op.tasks.map((task,tIdx)=>{
                       const ts=taskCursor; taskCursor+=task.duration;
-                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)}/>;
+                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={14}/>;
                     })}
                     <div data-opid={op.id} data-tidx={op.tasks.length}
                       onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
@@ -1996,7 +2110,7 @@ create policy "public_all_projects" on projects
                         onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
                         ⊞ TEMPLATE
                       </button>
-                      <button onClick={()=>addWait(op.id)} title="Add waiting / downtime block"
+                      <button onClick={()=>requestWait(op.id, null)} title="Add waiting / downtime block"
                         style={{flex:1,padding:"8px",background:"rgba(255,107,53,0.12)",border:"1px solid #FF6B35",color:"#FF6B35",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.background="rgba(255,107,53,0.22)";}}
                         onMouseLeave={e=>{e.target.style.background="rgba(255,107,53,0.12)";}}>
