@@ -371,7 +371,7 @@ function ReportPanel({operators, taskTypes, onClose}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TASK CARD
+// TASK CARD  (true proportional Gantt block)
 // ─────────────────────────────────────────────────────────────────────────────
 function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,onTouchStart,onTouchMove,onTouchEnd,dragging,dragOver,tIdx,phase,runMinutes,taskStart,onDelete,onUpdate,onContextMenu,scaleMin}) {
   const [editing,setEditing] = useState(false);
@@ -380,22 +380,30 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
   const isDraggingThis = dragging?.taskId===task.id;
   const isDropTarget   = dragOver?.opId===opId&&dragOver?.index===tIdx;
   const isWait = task.isWait;
-  // proportional height: scaleMin px per minute, with a readable floor
-  const propHeight = scaleMin && !editing ? Math.max(46, task.duration*scaleMin) : undefined;
   const tt = isWait ? {name:"Waiting",color:WAIT_COLOR} : (taskTypes.find(t=>t.name===task.type)||taskTypes[0]||{name:"",color:"#aaa"});
   const tc = tt.color;
   const lpTimer = useRef(null);
+
+  // ── proportional height: strictly scaleMin px per minute (true Gantt, no floor) ──
+  const px = scaleMin || 15;
+  const exactHeight = editing ? undefined : Math.max(task.duration * px, 16); // 16px hard floor only so a block is always clickable
+  // layout mode: if the block is too short to stack (tag over name), use a single inline row
+  const isCompact = !editing && exactHeight < 44;
+
   function handleTouchStartCombined(e){
-    // long-press 500ms (no move) → context menu; otherwise normal drag handler
     const touch=e.touches[0];
     const sx=touch.clientX, sy=touch.clientY;
     lpTimer.current=setTimeout(()=>{ onContextMenu(opId,task.id,tIdx,sx,sy); if(navigator.vibrate)navigator.vibrate(20); },500);
     onTouchStart(e,task.id,opId);
   }
   function clearLP(){ clearTimeout(lpTimer.current); }
+
+  const nameColor = isWait?"#b0b8c8":(isDone?"#6a7a6a":"#F0F4FA");
+  const displayName = isWait ? "Waiting / Downtime" : task.name;
+
   return (
     <>
-      {isDropTarget&&<div data-opid={opId} data-tidx={tIdx} style={{height:4,background:"#4ECDC4",borderRadius:2,margin:"3px 0",boxShadow:"0 0 8px #4ECDC4"}}/>}
+      {isDropTarget&&<div data-opid={opId} data-tidx={tIdx} style={{height:4,background:"#4ECDC4",borderRadius:2,boxShadow:"0 0 8px #4ECDC4"}}/>}
       <div
         draggable
         onDragStart={e=>onDragStart(e,task.id,opId)}
@@ -408,18 +416,23 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
         onTouchEnd={e=>{clearLP();onTouchEnd(e);}}
         data-opid={opId}
         data-tidx={tIdx}
+        title={`${displayName} — ${task.duration}m`}
         style={{
           background:isWait
             ? `repeating-linear-gradient(45deg, #20242E, #20242E 6px, #181C24 6px, #181C24 12px)`
             : (isDone?"#0d1f0d":isActive?tc+"22":isDraggingThis?"#1f2535":"#1A1F2B"),
           border:`1px ${isWait?"dashed":"solid"} ${isActive?tc:isDone?"#2a4a2a":isDraggingThis?"#4ECDC4":isWait?"#4a5160":"#2E3445"}`,
-          borderRadius:8,padding:"10px 12px",marginBottom:7,cursor:"grab",opacity:isDraggingThis?0.35:1,
-          boxShadow:isActive?`0 0 14px ${tc}55`:isDraggingThis?"0 0 12px #4ECDC444":"0 1px 3px #00000040",
-          transition:"all 0.18s",userSelect:"none",touchAction:"none",
-          minHeight:propHeight, display:"flex", flexDirection:"column", justifyContent:"center"
+          borderRadius:5,
+          padding: editing ? "10px 12px" : (isCompact ? "0 8px" : "6px 10px"),
+          marginBottom:1,                       // hairline; height stays ∝ time
+          cursor:"grab", opacity:isDraggingThis?0.35:1,
+          boxShadow:isActive?`0 0 14px ${tc}55`:isDraggingThis?"0 0 12px #4ECDC444":"none",
+          transition:"opacity 0.15s, box-shadow 0.18s", userSelect:"none", touchAction:"none",
+          height:exactHeight, minHeight:exactHeight, boxSizing:"border-box",
+          display:"flex", flexDirection: editing ? "column" : "row", alignItems:"center", overflow:"hidden",
         }}>
         {editing?(
-          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%"}}>
             {!isWait&&<input value={task.name} onChange={e=>onUpdate("name",e.target.value)} style={{...iSty,fontSize:13,padding:"8px 11px"}} autoFocus/>}
             <div style={{display:"flex",gap:6}}>
               <input type="number" value={task.duration} min={1} max={120}
@@ -433,20 +446,29 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
               <Btn onClick={()=>setEditing(false)} color="#4ECDC4" sm>✓</Btn>
             </div>
           </div>
+        ): isCompact ? (
+          /* ── COMPACT: single horizontal row — name ALWAYS visible ── */
+          <div style={{display:"flex",alignItems:"center",gap:7,width:"100%",minWidth:0}}>
+            <span style={{width:7,height:7,borderRadius:2,background:tc,flexShrink:0}}/>
+            <span style={{fontSize:11,color:nameColor,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,fontStyle:isWait?"italic":"normal"}}>{displayName}</span>
+            <span style={{fontSize:11,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",flexShrink:0}}>{task.duration}m</span>
+            <button onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}} style={{...iconBtnSty,fontSize:14,color:"#8a94a8",flexShrink:0}} title="More actions">⋮</button>
+          </div>
         ):(
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
+          /* ── FULL: stacked layout for taller blocks ── */
+          <div style={{display:"flex",alignItems:"flex-start",gap:8,width:"100%",minWidth:0}}>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4,flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
                 {isWait
                   ? <Pill color={WAIT_COLOR}>⏸ WAITING</Pill>
                   : <Pill color={tc}>{task.type}</Pill>}
                 {isDone&&<span style={{fontSize:9,color:"#00D9A3",fontWeight:700}}>✓ DONE</span>}
                 {isActive&&<span style={{fontSize:9,color:tc,animation:"blink 1s infinite",fontWeight:700}}>● {isWait?"IDLE":"ACTIVE"}</span>}
               </div>
-              <div style={{fontSize:13,color:isWait?"#9aa4b8":(isDone?"#6a7a6a":"#F0F4FA"),lineHeight:1.4,wordBreak:"break-word",fontWeight:500,fontStyle:isWait?"italic":"normal"}}>{task.name}</div>
+              <div style={{fontSize:13,color:nameColor,lineHeight:1.35,wordBreak:"break-word",fontWeight:500,fontStyle:isWait?"italic":"normal"}}>{displayName}</div>
             </div>
             <span style={{fontSize:15,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",minWidth:34,textAlign:"right",flexShrink:0}}>{task.duration}m</span>
-            <div style={{display:"flex",flexDirection:"column",gap:4,flexShrink:0}}>
+            <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
               <button onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}} style={{...iconBtnSty,fontSize:15,color:"#8a94a8"}} title="More actions (or right-click)">⋮</button>
               <button onClick={()=>setEditing(true)} style={{...iconBtnSty,fontSize:14,color:"#8a94a8"}} title="Edit">✎</button>
               <button onClick={onDelete} style={{...iconBtnSty,fontSize:14,color:"#9a4040"}} title="Delete">✕</button>
@@ -2038,7 +2060,23 @@ create policy "public_all_projects" on projects
 
         {/* ══ BOARD VIEW ══ */}
         {view==="board"&&(
-          <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:12,alignItems:"stretch",minHeight:"calc(100vh - 220px)"}}>
+          <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:12,alignItems:"flex-start",minHeight:"calc(100vh - 240px)"}}>
+            {/* Shared time axis */}
+            {(() => {
+              const px=15, axisTop=78; // header height offset to align with task area
+              const marks=[]; for(let m=0;m<=maxTime;m+=Math.max(1, maxTime<=15?1:maxTime<=40?5:10)) marks.push(m);
+              if(marks[marks.length-1]!==maxTime) marks.push(maxTime);
+              return (
+                <div style={{flexShrink:0,width:38,position:"relative",paddingTop:axisTop}}>
+                  {marks.map(m=>(
+                    <div key={m} style={{position:"absolute",top:axisTop+m*px,right:4,transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:4}}>
+                      <span style={{fontSize:9,color:m===maxTime?"#FF6B35":"#5a6478",fontWeight:m===maxTime?700:400}}>{m}m</span>
+                    </div>
+                  ))}
+                  <div style={{position:"absolute",top:axisTop,bottom:0,right:0,width:1,background:"#252A38"}}/>
+                </div>
+              );
+            })()}
             {operators.map((op,opIdx)=>{
               const opTime=op.tasks.reduce((s,t)=>s+t.duration,0);
               const isBottleneck=opTime===maxTime&&maxTime>1&&op.tasks.length>0;
@@ -2061,7 +2099,7 @@ create policy "public_all_projects" on projects
                   {phase==="run"&&<div style={{background:"#1A1D26",height:2}}><div style={{width:Math.min((runMinutes/(opTime||1))*100,100)+"%",height:"100%",background:OP_COLORS[opIdx%10],transition:"width 0.08s linear"}}/></div>}
 
                   {/* tasks */}
-                  <div style={{padding:"10px",flex:1,minHeight:160}} data-opid={op.id}
+                  <div style={{padding:"10px",minHeight:120}} data-opid={op.id}
                     onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
                     onDrop={e=>onDrop(e,op.id,op.tasks.length)}
                     onTouchMove={onTouchMove}
@@ -2069,7 +2107,7 @@ create policy "public_all_projects" on projects
                   >
                     {op.tasks.map((task,tIdx)=>{
                       const ts=taskCursor; taskCursor+=task.duration;
-                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={14}/>;
+                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={15}/>;
                     })}
                     <div data-opid={op.id} data-tidx={op.tasks.length}
                       onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
