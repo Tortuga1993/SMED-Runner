@@ -5,6 +5,14 @@ import { useState, useRef, useCallback, useEffect } from "react";
 // ─────────────────────────────────────────────────────────────────────────────
 const uid = () => Math.random().toString(36).substr(2, 9);
 
+// ── Duration formatter — always shows minutes ────────────────────────────────
+// Whole minutes: "5m"  |  Decimal minutes: "0.5m", "1.5m"  (max 2 decimal places)
+function fmtMin(min) {
+  if (!min || min <= 0) return "0m";
+  const rounded = Math.round(min * 100) / 100; // avoid floating-point noise
+  return Number.isInteger(rounded) ? rounded + "m" : rounded + "m";
+}
+
 const OP_COLORS = [
   "#FF6B35","#4ECDC4","#FFE66D","#A8E6CF","#FF8B94",
   "#6C5CE7","#00B894","#FDCB6E","#E17055","#74B9FF"
@@ -163,26 +171,47 @@ async function sbDelete(table, id) {
 }
 
 // ── Convert between app shape and DB shape ────────────────────────────────────
+// ── Theme tokens (used for JS-level colour logic e.g. accent text in light mode) ─
+const DARK_T = {
+  bg:"#080A0F", nav:"#11141D", card:"#0D0F14", card2:"#1A1F2B",
+  b1:"#1E2130", b2:"#252A38", b3:"#2E3445",
+  text:"#FFFFFF", body:"#E2E8F0", sub:"#8a94a8", muted:"#5a6478", vMuted:"#4a5568",
+  barBg:"#252A38", btnSec:"#1A1F2B", btnSecT:"#C0C8D8",
+  opText: (c) => c,                    // operator name text = bar colour
+  effColor: "#FFD93D", opsColor:"#4ECDC4",
+  archBtn:"#2a1010", archBord:"#6a2020", archC:"#E17055",
+  restoreC:"#4ECDC4",
+};
+const LIGHT_T = {
+  bg:"#ECEEF2", nav:"#E2E5EB", card:"#F4F5F8", card2:"#DDE0E8",
+  b1:"#C8CDD8", b2:"#BFC4CF", b3:"#B8BCC8",
+  text:"#1A1C28", body:"#2E3348", sub:"#5A6070", muted:"#7A8090", vMuted:"#9AA0AE",
+  barBg:"#D0D4DC", btnSec:"#DDE0E8", btnSecT:"#2E3348",
+  opText: (c) => {                     // darken vivid colours for readable light-mode text
+    const map = {"#FF6B35":"#D45A20","#4ECDC4":"#2A9E98","#FFE66D":"#9E7010",
+                 "#A8E6CF":"#2A7A60","#FF8B94":"#C04060","#6C5CE7":"#4A3AC0",
+                 "#00B894":"#007A64","#FDCB6E":"#B07820","#E17055":"#B04030","#74B9FF":"#3070C0"};
+    return map[c] || c;
+  },
+  effColor:"#C07010", opsColor:"#2A9E98",
+  archBtn:"#F5EDED", archBord:"#DCC0C0", archC:"#B04040",
+  restoreC:"#2A9E98",
+};
+
 function projectToRow(p) {
   return {
-    id: p.id,
-    name: p.name,
-    created: p.created,
-    notes: p.notes || "",
-    folder_id: p.folderId || null,
-    task_types: p.taskTypes || [],
+    id: p.id, name: p.name, created: p.created, notes: p.notes || "",
+    folder_id: p.folderId || null, task_types: p.taskTypes || [],
     operators: p.operators || [],
+    archived: p.archived || false, archived_at: p.archivedAt || null,
   };
 }
 function rowToProject(r) {
   return {
-    id: r.id,
-    name: r.name,
-    created: r.created,
-    notes: r.notes || "",
-    folderId: r.folder_id || null,
-    taskTypes: r.task_types || [],
+    id: r.id, name: r.name, created: r.created, notes: r.notes || "",
+    folderId: r.folder_id || null, taskTypes: r.task_types || [],
     operators: r.operators || [],
+    archived: r.archived || false, archivedAt: r.archived_at || null,
   };
 }
 function folderToRow(f) {
@@ -373,8 +402,12 @@ function ReportPanel({operators, taskTypes, onClose}) {
 // ─────────────────────────────────────────────────────────────────────────────
 // TASK CARD  (true proportional Gantt block)
 // ─────────────────────────────────────────────────────────────────────────────
-function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,onTouchStart,onTouchMove,onTouchEnd,dragging,dragOver,tIdx,phase,runMinutes,taskStart,onDelete,onUpdate,onContextMenu,scaleMin}) {
+function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,onTouchStart,onTouchMove,onTouchEnd,dragging,dragOver,tIdx,phase,runMinutes,taskStart,onDelete,onUpdate,onContextMenu,scaleMin,forceEdit,onEditDone}) {
   const [editing,setEditing] = useState(false);
+
+  // Context menu can trigger edit mode from outside
+  useEffect(()=>{ if(forceEdit){ setEditing(true); } },[forceEdit]);
+  function closeEdit(){ setEditing(false); if(forceEdit&&onEditDone) onEditDone(); }
   const isActive = phase==="run"&&runMinutes>=taskStart&&runMinutes<taskStart+task.duration;
   const isDone   = phase==="run"&&runMinutes>=taskStart+task.duration;
   const isDraggingThis = dragging?.taskId===task.id;
@@ -425,7 +458,7 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
         onTouchEnd={e=>{clearLP();onTouchEnd(e);}}
         data-opid={opId}
         data-tidx={tIdx}
-        title={`${displayName} — ${task.duration}m`}
+        title={`${displayName} — ${fmtMin(task.duration)}`}
         style={{
           background:isWait
             ? `repeating-linear-gradient(45deg, #20242E, #20242E 6px, #181C24 6px, #181C24 12px)`
@@ -438,51 +471,58 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
           boxShadow:isActive?`0 0 14px ${tc}55`:isDraggingThis?"0 0 12px #4ECDC444":"none",
           transition:"opacity 0.15s, box-shadow 0.18s", userSelect:"none", touchAction:"none",
           height:exactHeight, minHeight:exactHeight, boxSizing:"border-box",
-          display:"flex", flexDirection: editing ? "column" : "row", alignItems:"center", overflow:"hidden",
+          display:"flex", flexDirection:"column", overflow:"hidden",
         }}>
         {editing?(
-          <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%"}}>
-            {!isWait&&<input value={task.name} onChange={e=>onUpdate("name",e.target.value)} style={{...iSty,fontSize:13,padding:"8px 11px"}} autoFocus/>}
+          <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%",padding:"2px 0"}}>
+            {!isWait&&<input value={task.name} onChange={e=>onUpdate("name",e.target.value)} style={{...iSty,fontSize:13,padding:"7px 10px"}} autoFocus/>}
             <div style={{display:"flex",gap:6}}>
-              <input type="number" value={task.duration} min={1} max={120}
+              <input type="number" value={task.duration} min={0.01} max={240}
                 onChange={e=>onUpdate("duration",Number(e.target.value))}
-                style={{...iSty,width:64,fontSize:13,padding:"8px",color:"#FFE66D"}} autoFocus={isWait}/>
+                style={{...iSty,width:68,fontSize:13,padding:"7px",color:"#FFD93D"}} autoFocus={isWait}/>
               {!isWait&&<select value={task.type} onChange={e=>onUpdate("type",e.target.value)}
-                style={{...iSty,flex:1,fontSize:12,padding:"8px",color:tc}}>
+                style={{...iSty,flex:1,fontSize:12,padding:"7px",color:tc}}>
                 {taskTypes.map(t=><option key={t.name} value={t.name}>{t.name}</option>)}
               </select>}
-              {isWait&&<span style={{flex:1,fontSize:11,color:WAIT_COLOR,display:"flex",alignItems:"center",letterSpacing:"0.06em"}}>⏸ DOWNTIME (min)</span>}
-              <Btn onClick={()=>setEditing(false)} color="#4ECDC4" sm>✓</Btn>
+              {isWait&&<span style={{flex:1,fontSize:11,color:WAIT_COLOR,display:"flex",alignItems:"center"}}>⏸ DOWNTIME</span>}
+              <Btn onClick={closeEdit} color="#4ECDC4" sm>✓</Btn>
             </div>
-          </div>
-        ): isCompact ? (
-          /* ── COMPACT: single horizontal row — name ALWAYS visible ── */
-          <div style={{display:"flex",alignItems:"center",gap:7,width:"100%",minWidth:0}}>
-            <span style={{width:7,height:7,borderRadius:2,background:tc,flexShrink:0}}/>
-            <span style={{fontSize:11,color:nameColor,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",flex:1,fontStyle:isWait?"italic":"normal"}}>{displayName}</span>
-            <span style={{fontSize:11,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",flexShrink:0}}>{task.duration}m</span>
-            <button onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}} style={{...iconBtnSty,fontSize:14,color:"#8a94a8",flexShrink:0}} title="More actions">⋮</button>
           </div>
         ):(
-          /* ── FULL: stacked layout for taller blocks ── */
-          <div style={{display:"flex",alignItems:"flex-start",gap:8,width:"100%",minWidth:0}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
-                {isWait
-                  ? <Pill color={WAIT_COLOR}>⏸ WAITING</Pill>
-                  : <Pill color={tc}>{task.type}</Pill>}
-                {isDone&&<span style={{fontSize:9,color:"#00D9A3",fontWeight:700}}>✓ DONE</span>}
-                {isActive&&<span style={{fontSize:9,color:tc,animation:"blink 1s infinite",fontWeight:700}}>● {isWait?"IDLE":"ACTIVE"}</span>}
+          /* ── UNIFIED CLEAN LAYOUT (all block sizes) ──────────────────────────
+             Top strip: [type pill]  ·····  [Xm]  [⋮]
+             Name row:  task name (wraps if needed, hidden if block too short)
+             ─────────────────────────────────────────────────────────────────── */
+          <>
+            {/* Top strip — always visible, always consistent */}
+            <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0,minWidth:0}}>
+              {/* Type indicator */}
+              {isWait
+                ? <span style={{fontSize:9,background:WAIT_COLOR+"22",color:WAIT_COLOR,padding:"1px 6px",borderRadius:10,fontWeight:700,letterSpacing:"0.04em",flexShrink:0}}>⏸ WAIT</span>
+                : <span style={{fontSize:9,background:tc+"22",color:tc,padding:"1px 6px",borderRadius:10,fontWeight:700,letterSpacing:"0.04em",flexShrink:0,maxWidth:90,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.type}</span>
+              }
+              {/* Status badges */}
+              {isDone  && <span style={{fontSize:8,color:"#00D9A3",fontWeight:700,flexShrink:0}}>✓</span>}
+              {isActive && <span style={{fontSize:8,color:tc,animation:"blink 1s infinite",fontWeight:700,flexShrink:0}}>●</span>}
+              {/* Spacer */}
+              <span style={{flex:1}}/>
+              {/* Duration — always top-right */}
+              <span style={{fontSize:12,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",flexShrink:0,letterSpacing:"0.02em"}}>{fmtMin(task.duration)}</span>
+              {/* ⋮ menu — right of duration */}
+              <button
+                onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}}
+                style={{...iconBtnSty,fontSize:16,color:"#6a7480",padding:"0 1px",flexShrink:0,lineHeight:1}}
+                title="Right-click or tap to edit / add wait / delete">⋮</button>
+            </div>
+            {/* Task name — shown only when there's vertical room */}
+            {!isCompact&&(
+              <div style={{fontSize:12,color:nameColor,lineHeight:1.35,fontWeight:500,
+                fontStyle:isWait?"italic":"normal",marginTop:3,
+                wordBreak:"break-word",overflow:"hidden"}}>
+                {displayName}
               </div>
-              <div style={{fontSize:13,color:nameColor,lineHeight:1.35,wordBreak:"break-word",fontWeight:500,fontStyle:isWait?"italic":"normal"}}>{displayName}</div>
-            </div>
-            <span style={{fontSize:15,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",minWidth:34,textAlign:"right",flexShrink:0}}>{task.duration}m</span>
-            <div style={{display:"flex",flexDirection:"column",gap:3,flexShrink:0}}>
-              <button onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}} style={{...iconBtnSty,fontSize:15,color:"#8a94a8"}} title="More actions (or right-click)">⋮</button>
-              <button onClick={()=>setEditing(true)} style={{...iconBtnSty,fontSize:14,color:"#8a94a8"}} title="Edit">✎</button>
-              <button onClick={onDelete} style={{...iconBtnSty,fontSize:14,color:"#9a4040"}} title="Delete">✕</button>
-            </div>
-          </div>
+            )}
+          </>
         )}
       </div>
     </>
@@ -626,69 +666,76 @@ function QuickStartWizard({onLaunch, onCancel}) {
 const FOLDER_COLORS = ["#FF6B35","#4ECDC4","#6C5CE7","#00B894","#FFE66D","#FF8B94","#74B9FF","#FDCB6E","#E17055","#A8E6CF"];
 const FOLDER_ICONS  = ["🏭","🏗️","🔧","⚙️","🏢","🛠️","📦","🚀","🔬","🏪"];
 
-function ProjectCard({p, onOpen, onDelete, onDuplicate, onMoveToFolder, folders, style={}}) {
+function ProjectCard({p, onOpen, onArchive, onDuplicate, onMoveToFolder, folders, T, style={}}) {
   const ops = p.operators||[];
   const mxT = Math.max(...ops.map(o=>o.tasks.reduce((s,t)=>s+t.duration,0)),1);
   const mnT = Math.min(...ops.map(o=>o.tasks.reduce((s,t)=>s+t.duration,0)));
   const eff = Math.round((mnT/mxT)*100);
   const [showMove, setShowMove] = useState(false);
+  const effColor = eff>85?"#00B894":eff>60?(T?.effColor||"#FFD93D"):"#E17055";
 
   return (
-    <div style={{background:"#0D0F14",border:"1px solid #1E2130",borderRadius:12,overflow:"visible",cursor:"pointer",transition:"all 0.2s",textAlign:"left",position:"relative",...style}}
+    <div style={{background:"var(--smed-card)",border:"1px solid var(--smed-b1)",borderRadius:12,overflow:"visible",cursor:"pointer",transition:"border-color 0.2s, transform 0.15s, box-shadow 0.15s",textAlign:"left",position:"relative",...style}}
       onClick={()=>onOpen(p.id)}
-      onMouseEnter={e=>{e.currentTarget.style.borderColor="#FF6B35";e.currentTarget.style.transform="translateY(-2px)";}}
-      onMouseLeave={e=>{e.currentTarget.style.borderColor="#1E2130";e.currentTarget.style.transform="translateY(0)";}}>
+      onMouseEnter={e=>{e.currentTarget.style.borderColor="#FF6B35";e.currentTarget.style.transform="translateY(-2px)";e.currentTarget.style.boxShadow="0 4px 16px rgba(0,0,0,0.18)";}}
+      onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--smed-b1)";e.currentTarget.style.transform="translateY(0)";e.currentTarget.style.boxShadow="none";}}>
       <div style={{padding:"12px 14px",display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
         <div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:13,fontWeight:700,color:"#FFF",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
-          <div style={{fontSize:9,color:"#4a5568",marginTop:2}}>{new Date(p.created).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}</div>
+          <div style={{fontSize:14,fontWeight:800,color:"var(--smed-text)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+          <div style={{fontSize:9,color:"var(--smed-muted)",marginTop:3}}>{new Date(p.created).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"})}</div>
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+        <div style={{display:"flex",gap:10,alignItems:"center",flexShrink:0}}>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:8,color:"#4a5568"}}>OPS</div>
-            <div style={{fontSize:15,fontWeight:800,color:"#4ECDC4"}}>{ops.length}</div>
+            <div style={{fontSize:8,color:"var(--smed-sub)",letterSpacing:"0.1em",fontWeight:600}}>OPS</div>
+            <div style={{fontSize:16,fontWeight:800,color:T?.opsColor||"#4ECDC4"}}>{ops.length}</div>
           </div>
           <div style={{textAlign:"right"}}>
-            <div style={{fontSize:8,color:"#4a5568"}}>EFF</div>
-            <div style={{fontSize:15,fontWeight:800,color:eff>85?"#00B894":eff>60?"#FFE66D":"#E17055"}}>{eff}%</div>
+            <div style={{fontSize:8,color:"var(--smed-sub)",letterSpacing:"0.1em",fontWeight:600}}>EFF</div>
+            <div style={{fontSize:16,fontWeight:800,color:effColor}}>{eff}%</div>
           </div>
-          <div style={{display:"flex",flexDirection:"column",gap:3}} onClick={e=>e.stopPropagation()}>
-            <button onClick={()=>setShowMove(v=>!v)} title="Move to folder" style={{...iconBtnSty,fontSize:12}}>📁</button>
-            <button onClick={()=>onDuplicate(p.id)} title="Duplicate" style={{...iconBtnSty,fontSize:12,color:"#4ECDC4"}}>⧉</button>
-            <button onClick={()=>onDelete(p.id)} title="Delete" style={{...iconBtnSty,fontSize:12,color:"#6a2020"}}>🗑</button>
+          <div style={{display:"flex",flexDirection:"column",gap:4}} onClick={e=>e.stopPropagation()}>
+            <button onClick={()=>setShowMove(v=>!v)} title="Move to folder"
+              style={{...iconBtnSty,fontSize:12,color:"var(--smed-sub)"}}>📁</button>
+            <button onClick={()=>onDuplicate(p.id)} title="Duplicate"
+              style={{...iconBtnSty,fontSize:12,color:T?.opsColor||"#4ECDC4"}}>⧉</button>
+            <button onClick={()=>onArchive(p.id)} title="Archive this project"
+              style={{...iconBtnSty,fontSize:12,padding:"3px 6px",color:T?.archC||"#E17055",background:(T?.archBtn||"#2a1010")+"cc",border:`1px solid ${T?.archBord||"#6a2020"}`,borderRadius:5}}>🗄</button>
           </div>
         </div>
       </div>
       {/* operator bars */}
-      <div style={{padding:"0 14px 10px",display:"flex",flexDirection:"column",gap:3}}>
-        {ops.slice(0,3).map((o,oi)=>{
+      <div style={{padding:"0 14px 12px",display:"flex",flexDirection:"column",gap:4}}>
+        {ops.slice(0,4).map((o,oi)=>{
           const t=o.tasks.reduce((s,tk)=>s+tk.duration,0);
+          const barColor = OP_COLORS[oi%10];
+          const textColor = T ? T.opText(barColor) : barColor;
           return (
             <div key={o.id} style={{display:"flex",alignItems:"center",gap:8}}>
-              <span style={{fontSize:8,color:OP_COLORS[oi%10],minWidth:76,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.name}</span>
-              <div style={{flex:1,background:"#1A1D26",borderRadius:2,height:3}}>
-                <div style={{width:(t/mxT*100)+"%",height:"100%",background:OP_COLORS[oi%10],borderRadius:2}}/>
+              <span style={{fontSize:9,fontWeight:600,color:textColor,minWidth:80,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{o.name}</span>
+              <div style={{flex:1,background:"var(--smed-bar)",borderRadius:2,height:4}}>
+                <div style={{width:(t/mxT*100)+"%",height:"100%",background:barColor,borderRadius:2}}/>
               </div>
-              <span style={{fontSize:8,color:"#4a5568",minWidth:20}}>{t}m</span>
+              <span style={{fontSize:9,color:"var(--smed-sub)",minWidth:28,textAlign:"right"}}>{fmtMin(t)}</span>
             </div>
           );
         })}
-        {ops.length>3&&<span style={{fontSize:8,color:"#4a5568"}}>+{ops.length-3} more</span>}
+        {ops.length>4&&<span style={{fontSize:9,color:"var(--smed-muted)"}}>+{ops.length-4} more operators</span>}
       </div>
       {/* move-to-folder dropdown */}
       {showMove&&(
-        <div style={{position:"absolute",right:0,top:"100%",zIndex:50,background:"#0D0F14",border:"1px solid #2A2D3A",borderRadius:10,padding:8,minWidth:180,boxShadow:"0 8px 32px #000a"}}
+        <div style={{position:"absolute",right:0,top:"100%",zIndex:50,background:"var(--smed-card)",border:"1px solid var(--smed-b2)",borderRadius:10,padding:8,minWidth:190,boxShadow:"0 8px 32px #000a"}}
           onClick={e=>e.stopPropagation()}>
-          <div style={{fontSize:9,color:"#4a5568",letterSpacing:"0.12em",padding:"4px 6px 6px"}}>MOVE TO FOLDER</div>
+          <div style={{fontSize:9,color:"var(--smed-muted)",letterSpacing:"0.12em",padding:"4px 6px 6px",fontWeight:600}}>MOVE TO FOLDER</div>
           <div style={{display:"flex",flexDirection:"column",gap:4}}>
             <button onClick={()=>{onMoveToFolder(p.id,null);setShowMove(false);}}
-              style={{...iconBtnSty,justifyContent:"flex-start",gap:8,padding:"6px 8px",width:"100%",fontSize:11,color:!p.folderId?"#FF6B35":"#9CA3AF",background:!p.folderId?"#FF6B3514":"transparent",borderRadius:6}}>
+              style={{...iconBtnSty,justifyContent:"flex-start",gap:8,padding:"6px 8px",width:"100%",fontSize:11,color:!p.folderId?"#FF6B35":"var(--smed-sub)",background:!p.folderId?"#FF6B3514":"transparent",borderRadius:6}}>
               📋 Uncategorised {!p.folderId&&"✓"}
             </button>
             {folders.map(f=>(
               <button key={f.id} onClick={()=>{onMoveToFolder(p.id,f.id);setShowMove(false);}}
-                style={{...iconBtnSty,justifyContent:"flex-start",gap:8,padding:"6px 8px",width:"100%",fontSize:11,color:p.folderId===f.id?f.color:"#9CA3AF",background:p.folderId===f.id?f.color+"14":"transparent",borderRadius:6}}>
-                <span>{f.icon}</span><span style={{flex:1,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</span>
+                style={{...iconBtnSty,justifyContent:"flex-start",gap:8,padding:"6px 8px",width:"100%",fontSize:11,color:p.folderId===f.id?f.color:"var(--smed-sub)",background:p.folderId===f.id?f.color+"14":"transparent",borderRadius:6}}>
+                <span>{f.icon}</span>
+                <span style={{flex:1,textAlign:"left",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</span>
                 {p.folderId===f.id&&<span style={{color:f.color}}>✓</span>}
               </button>
             ))}
@@ -700,22 +747,28 @@ function ProjectCard({p, onOpen, onDelete, onDuplicate, onMoveToFolder, folders,
 }
 
 function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject,
+  onArchiveProject, onRestoreProject,
   onDuplicateProject, onMoveToFolder, onCreateFolder, onDeleteFolder, onRenameFolder,
-  saveIndicator, syncing, onRefresh, dbReady, onStartDemo}) {
-  const [showContinue, setShowContinue] = useState(false);
-  const [openFolders,  setOpenFolders]  = useState({}); // folderId -> bool
-  const [showNewFolder, setShowNewFolder] = useState(false);
-  const [newFolderName, setNewFolderName] = useState("");
-  const [newFolderIcon, setNewFolderIcon] = useState("🏭");
-  const [newFolderColor,setNewFolderColor]= useState("#FF6B35");
-  const [renamingFolder,setRenamingFolder]= useState(null);
-  const [renameVal,     setRenameVal]     = useState("");
-  const [showTutorialAsk, setShowTutorialAsk] = useState(false);
+  saveIndicator, syncing, onRefresh, dbReady, onStartDemo, theme, setTheme, T}) {
+
+  T = T || DARK_T;
+  const [showContinue,   setShowContinue]   = useState(false);
+  const [showArchive,    setShowArchive]     = useState(false);
+  const [openFolders,    setOpenFolders]     = useState({});
+  const [showNewFolder,  setShowNewFolder]   = useState(false);
+  const [newFolderName,  setNewFolderName]   = useState("");
+  const [newFolderIcon,  setNewFolderIcon]   = useState("🏭");
+  const [newFolderColor, setNewFolderColor]  = useState("#FF6B35");
+  const [renamingFolder, setRenamingFolder]  = useState(null);
+  const [renameVal,      setRenameVal]       = useState("");
+  const [showTutorialAsk,setShowTutorialAsk] = useState(false);
+  const [confirmDelete,  setConfirmDelete]   = useState(null); // id of project to permanently delete
 
   function toggleFolder(id) { setOpenFolders(s=>({...s,[id]:!s[id]})); }
 
-  // split projects
-  const uncategorised = projects.filter(p=>!p.folderId);
+  const activeProjects   = projects.filter(p=>!p.archived);
+  const archivedProjects = projects.filter(p=>p.archived);
+  const uncategorised    = activeProjects.filter(p=>!p.folderId);
 
   function createFolder() {
     if (!newFolderName.trim()) return;
@@ -724,157 +777,147 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
   }
 
   return (
-    <div style={{minHeight:"100vh",background:"#0B0E15",color:"#E8EDF5",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
+    <div style={{minHeight:"100vh",background:"var(--smed-bg)",color:"var(--smed-body)",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
       <style>{globalCSS}</style>
-      {/* Nav */}
-      <div style={{padding:"18px 22px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid #1E2130"}}>
-        <Logo/>
-      </div>
 
-      {/* Hero */}
-      <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"36px 22px 24px",textAlign:"center"}}>
-        <Pill color="#FF6B35" style={{marginBottom:12}}>LEAN MANUFACTURING TOOL</Pill>
-        <h1 style={{fontSize:"clamp(26px,5vw,48px)",fontWeight:900,color:"#FFF",margin:"0 0 10px",letterSpacing:"0.04em",lineHeight:1.1}}>
-          Single Minute<br/><span style={{color:"#FF6B35"}}>Exchange of Die</span>
-        </h1>
-        <p style={{fontSize:"clamp(11px,1.8vw,14px)",color:"#4a5568",maxWidth:380,lineHeight:1.7,marginBottom:32}}>
-          Plan, balance and simulate multi-operator changeovers.
-        </p>
-        <div style={{display:"flex",flexDirection:"column",gap:12,width:"100%",maxWidth:320}}>
-          <Btn onClick={onStartNew} color="#FF6B35" full style={{padding:"15px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,14px)"}}>
-            ▶ START SMED BOARD
-          </Btn>
-          <Btn onClick={()=>setShowContinue(v=>!v)} color="#12141C" text="#E2E8F0" full
-            style={{padding:"15px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,14px)",border:"1px solid #2A2D3A",boxShadow:"none"}}>
-            {showContinue?"▲ HIDE PROJECTS":"◈ CONTINUE A PROJECT"}
-          </Btn>
-          <Btn onClick={()=>setShowTutorialAsk(true)} color="#12141C" text="#4ECDC4" full
-            style={{padding:"15px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,14px)",border:"1px solid #4ECDC444",boxShadow:"none"}}>
-            🎓 TUTORIAL / TEST
-          </Btn>
+      {/* ── NAV ── */}
+      <div style={{padding:"14px 22px",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:"1px solid var(--smed-b1)",background:"var(--smed-nav)"}}>
+        <Logo/>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {/* Theme toggle */}
+          <div style={{display:"flex",background:"var(--smed-card2)",border:"1px solid var(--smed-b2)",borderRadius:18,padding:3,gap:2}}>
+            {[["dark","◑ DARK"],["light","☀ LIGHT"]].map(([m,l])=>(
+              <button key={m} onClick={()=>setTheme&&setTheme(m)}
+                style={{background:theme===m?"#FF6B35":"transparent",color:theme===m?"#fff":"var(--smed-sub)",border:"none",fontFamily:"inherit",fontSize:10,fontWeight:theme===m?700:400,padding:"5px 12px",borderRadius:14,cursor:"pointer",transition:"all 0.2s",letterSpacing:"0.06em"}}>{l}</button>
+            ))}
+          </div>
+          <button onClick={onRefresh} style={{...iconBtnSty,fontSize:10,color:saveIndicator?"#00B894":"var(--smed-muted)",background:"var(--smed-card2)",border:`1px solid ${saveIndicator?"#00B89444":"var(--smed-b2)"}`,borderRadius:6,padding:"5px 10px",letterSpacing:"0.08em",transition:"all 0.3s"}}>
+            {syncing?"⏳":saveIndicator?"✓ SAVED":"↻ SYNC"}
+          </button>
         </div>
       </div>
 
-      {/* Tutorial ask modal */}
+      {/* ── HERO ── */}
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center",padding:"36px 22px 24px",textAlign:"center"}}>
+        <Pill color="#FF6B35" style={{marginBottom:12}}>LEAN MANUFACTURING TOOL</Pill>
+        <h1 style={{fontSize:"clamp(26px,5vw,44px)",fontWeight:900,color:"var(--smed-text)",margin:"0 0 10px",letterSpacing:"0.04em",lineHeight:1.1}}>
+          Single Minute<br/><span style={{color:"#FF6B35"}}>Exchange of Die</span>
+        </h1>
+        <p style={{fontSize:"clamp(11px,1.8vw,13px)",color:"var(--smed-sub)",maxWidth:380,lineHeight:1.7,marginBottom:28}}>
+          Plan, balance and simulate multi-operator changeovers.
+        </p>
+        <div style={{display:"flex",flexDirection:"column",gap:10,width:"100%",maxWidth:300}}>
+          <Btn onClick={onStartNew} color="#FF6B35" full style={{padding:"14px 24px",borderRadius:12,fontSize:"clamp(12px,2.5vw,13px)"}}>
+            ▶ START SMED BOARD
+          </Btn>
+          <button onClick={()=>setShowContinue(v=>!v)}
+            style={{width:"100%",padding:"14px 24px",background:"var(--smed-card2)",border:"1px solid var(--smed-b2)",color:"var(--smed-body)",fontFamily:"inherit",fontSize:"clamp(12px,2.5vw,13px)",fontWeight:600,borderRadius:12,cursor:"pointer",letterSpacing:"0.06em",transition:"all 0.2s"}}
+            onMouseEnter={e=>{e.target.style.borderColor="#FF6B35";e.target.style.color="#FF6B35";}}
+            onMouseLeave={e=>{e.target.style.borderColor="var(--smed-b2)";e.target.style.color="var(--smed-body)";}}>
+            {showContinue?"▲ HIDE PROJECTS":"◈ CONTINUE A PROJECT"}
+          </button>
+          <button onClick={()=>setShowTutorialAsk(true)}
+            style={{width:"100%",padding:"14px 24px",background:"var(--smed-card2)",border:`1px solid ${T.restoreC}44`,color:T.restoreC,fontFamily:"inherit",fontSize:"clamp(12px,2.5vw,13px)",fontWeight:600,borderRadius:12,cursor:"pointer",letterSpacing:"0.06em"}}>
+            🎓 TUTORIAL / TEST
+          </button>
+        </div>
+      </div>
+
+      {/* ── TUTORIAL MODAL ── */}
       {showTutorialAsk&&(
-        <div style={{position:"fixed",inset:0,background:"#000d",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
-          onClick={()=>setShowTutorialAsk(false)}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#11141D",border:"1px solid #4ECDC444",borderRadius:16,width:"100%",maxWidth:420,padding:"28px 26px",textAlign:"center"}}>
+        <div style={{position:"fixed",inset:0,background:"#000d",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setShowTutorialAsk(false)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"var(--smed-nav)",border:`1px solid ${T.restoreC}44`,borderRadius:16,width:"100%",maxWidth:420,padding:"28px 26px",textAlign:"center"}}>
             <div style={{fontSize:36,marginBottom:10}}>🎓</div>
-            <div style={{fontSize:18,fontWeight:800,color:"#FFF",marginBottom:8}}>Tutorial / Test</div>
-            <div style={{fontSize:13,color:"#9aa4b8",lineHeight:1.6,marginBottom:6}}>
-              Would you like to be guided through all the functions?
-            </div>
-            <div style={{fontSize:11,color:"#5a6478",lineHeight:1.6,marginBottom:22}}>
-              This opens a demo "Tea &amp; Toast" changeover. Nothing is saved — it resets for the next person when you leave.
+            <div style={{fontSize:18,fontWeight:800,color:"var(--smed-text)",marginBottom:8}}>Tutorial / Test</div>
+            <div style={{fontSize:13,color:"var(--smed-sub)",lineHeight:1.6,marginBottom:6}}>Would you like to be guided through all the functions?</div>
+            <div style={{fontSize:11,color:"var(--smed-muted)",lineHeight:1.6,marginBottom:22}}>
+              Opens a demo "Tea &amp; Toast" changeover. Nothing is saved — it resets for the next person when you leave.
             </div>
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(true);}} color="#4ECDC4" full
-                style={{padding:"13px",borderRadius:10}}>
-                ✓ YES — GUIDE ME THROUGH IT
-              </Btn>
-              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(false);}} color="#FF6B35" full
-                style={{padding:"13px",borderRadius:10}}>
-                ✗ NO — JUST LET ME PLAY
-              </Btn>
-              <button onClick={()=>setShowTutorialAsk(false)}
-                style={{background:"transparent",border:"none",color:"#5a6478",fontFamily:"inherit",fontSize:11,cursor:"pointer",padding:"6px",letterSpacing:"0.08em"}}>
-                CANCEL
-              </button>
+              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(true);}} color={T.restoreC} full style={{padding:"13px",borderRadius:10}}>✓ YES — GUIDE ME THROUGH IT</Btn>
+              <Btn onClick={()=>{setShowTutorialAsk(false);onStartDemo(false);}} color="#FF6B35" full style={{padding:"13px",borderRadius:10}}>✗ NO — JUST LET ME PLAY</Btn>
+              <button onClick={()=>setShowTutorialAsk(false)} style={{background:"transparent",border:"none",color:"var(--smed-muted)",fontFamily:"inherit",fontSize:11,cursor:"pointer",padding:"6px",letterSpacing:"0.08em"}}>CANCEL</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Project Library */}
+      {/* ── PROJECT LIBRARY ── */}
       {showContinue&&(
-        <div style={{flex:1,padding:"0 22px 32px",maxWidth:600,width:"100%",margin:"0 auto",animation:"fadeIn 0.25s ease"}}>
+        <div style={{flex:1,padding:"0 22px 32px",maxWidth:640,width:"100%",margin:"0 auto",animation:"fadeIn 0.25s ease"}}>
 
           {/* Library header */}
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-            <div style={{fontSize:10,color:"#4a5568",letterSpacing:"0.14em"}}>PROJECT LIBRARY · {projects.length} BOARDS</div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+            <div style={{fontSize:10,color:"var(--smed-sub)",letterSpacing:"0.14em",fontWeight:600}}>
+              PROJECT LIBRARY · {activeProjects.length} BOARD{activeProjects.length!==1?"S":""}
+            </div>
             <button onClick={()=>setShowNewFolder(v=>!v)}
-              style={{...iconBtnSty,background:"#12141C",border:"1px solid #1E2130",borderRadius:7,padding:"6px 12px",fontSize:11,color:"#4ECDC4",letterSpacing:"0.08em",gap:5}}>
+              style={{...iconBtnSty,background:"var(--smed-card2)",border:`1px solid var(--smed-b1)`,borderRadius:7,padding:"6px 12px",fontSize:11,color:T.restoreC,letterSpacing:"0.08em",gap:5,fontWeight:600}}>
               + NEW FOLDER
             </button>
           </div>
 
           {/* New folder form */}
           {showNewFolder&&(
-            <div style={{background:"#0D0F14",border:"1px solid #4ECDC444",borderRadius:12,padding:16,marginBottom:16,animation:"fadeIn 0.2s ease"}}>
-              <div style={{fontSize:10,color:"#4ECDC4",letterSpacing:"0.12em",marginBottom:10}}>NEW LOCATION FOLDER</div>
+            <div style={{background:"var(--smed-card)",border:`1px solid ${T.restoreC}44`,borderRadius:12,padding:16,marginBottom:14,animation:"fadeIn 0.2s ease"}}>
+              <div style={{fontSize:10,color:T.restoreC,letterSpacing:"0.12em",marginBottom:10,fontWeight:600}}>NEW LOCATION FOLDER</div>
               <input placeholder="e.g. Manchester Site, Line 4, Warehouse B…"
                 value={newFolderName} onChange={e=>setNewFolderName(e.target.value)}
                 onKeyDown={e=>e.key==="Enter"&&createFolder()}
                 style={{...iSty,fontSize:13,marginBottom:10}} autoFocus/>
-              {/* Icon picker */}
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
                 {FOLDER_ICONS.map(ic=>(
                   <button key={ic} onClick={()=>setNewFolderIcon(ic)}
-                    style={{width:34,height:34,fontSize:18,background:newFolderIcon===ic?"#FF6B3522":"#12141C",border:`1px solid ${newFolderIcon===ic?"#FF6B35":"#1E2130"}`,borderRadius:8,cursor:"pointer",transition:"all 0.15s"}}>
+                    style={{width:34,height:34,fontSize:18,background:newFolderIcon===ic?"#FF6B3522":"var(--smed-card2)",border:`1px solid ${newFolderIcon===ic?"#FF6B35":"var(--smed-b1)"}`,borderRadius:8,cursor:"pointer",transition:"all 0.15s"}}>
                     {ic}
                   </button>
                 ))}
               </div>
-              {/* Colour picker */}
               <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
                 {FOLDER_COLORS.map(c=>(
                   <button key={c} onClick={()=>setNewFolderColor(c)}
-                    style={{width:22,height:22,borderRadius:"50%",background:c,border:`2px solid ${newFolderColor===c?"#FFF":"transparent"}`,cursor:"pointer",transition:"border 0.1s"}}/>
+                    style={{width:22,height:22,borderRadius:"50%",background:c,border:`2px solid ${newFolderColor===c?"var(--smed-text)":"transparent"}`,cursor:"pointer"}}/>
                 ))}
               </div>
               <div style={{display:"flex",gap:8}}>
-                <Btn onClick={createFolder} color="#4ECDC4" sm style={{flex:1}} disabled={!newFolderName.trim()}>CREATE FOLDER</Btn>
-                <Btn onClick={()=>setShowNewFolder(false)} color="#1E2130" text="#9CA3AF" sm>✕</Btn>
+                <Btn onClick={createFolder} color={T.restoreC} sm style={{flex:1}} disabled={!newFolderName.trim()}>CREATE FOLDER</Btn>
+                <Btn onClick={()=>setShowNewFolder(false)} color="var(--smed-b2)" text="var(--smed-sub)" sm>✕</Btn>
               </div>
             </div>
           )}
 
           {/* Folders */}
-          {folders.map((f,fi)=>{
-            const folderProjects = projects.filter(p=>p.folderId===f.id);
-            const isOpen = openFolders[f.id] !== false; // default open
+          {folders.map(f=>{
+            const fp = activeProjects.filter(p=>p.folderId===f.id);
+            const isOpen = openFolders[f.id] !== false;
             return (
-              <div key={f.id} style={{marginBottom:12}}>
-                {/* Folder header */}
-                <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"#0D0F14",border:`1px solid ${f.color}33`,borderRadius:isOpen&&folderProjects.length>0?"10px 10px 0 0":"10px",cursor:"pointer",transition:"all 0.2s"}}
+              <div key={f.id} style={{marginBottom:10}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"var(--smed-card)",border:`1px solid ${f.color}44`,borderRadius:isOpen&&fp.length>0?"10px 10px 0 0":"10px",cursor:"pointer",transition:"all 0.2s"}}
                   onClick={()=>toggleFolder(f.id)}>
-                  <div style={{width:32,height:32,background:f.color+"22",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>
-                    {f.icon}
-                  </div>
+                  <div style={{width:32,height:32,background:f.color+"22",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{f.icon}</div>
                   <div style={{flex:1,minWidth:0}}>
                     {renamingFolder===f.id?(
                       <input value={renameVal} onChange={e=>setRenameVal(e.target.value)}
                         onBlur={()=>{onRenameFolder(f.id,renameVal);setRenamingFolder(null);}}
                         onKeyDown={e=>{if(e.key==="Enter"){onRenameFolder(f.id,renameVal);setRenamingFolder(null);}}}
-                        onClick={e=>e.stopPropagation()}
-                        style={{...iSty,fontSize:12,fontWeight:700,padding:"3px 6px"}} autoFocus/>
+                        onClick={e=>e.stopPropagation()} style={{...iSty,fontSize:12,fontWeight:700,padding:"3px 6px"}} autoFocus/>
                     ):(
                       <div style={{fontSize:13,fontWeight:700,color:f.color,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.name}</div>
                     )}
-                    <div style={{fontSize:9,color:"#4a5568",marginTop:1}}>{folderProjects.length} project{folderProjects.length!==1?"s":""}</div>
+                    <div style={{fontSize:9,color:"var(--smed-muted)",marginTop:1}}>{fp.length} project{fp.length!==1?"s":""}</div>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:6}} onClick={e=>e.stopPropagation()}>
-                    <button onClick={()=>{setRenamingFolder(f.id);setRenameVal(f.name);}}
-                      style={{...iconBtnSty,fontSize:12,color:"#4a5568"}}>✎</button>
-                    <button onClick={()=>onDeleteFolder(f.id)}
-                      style={{...iconBtnSty,fontSize:12,color:"#6a2020"}}>🗑</button>
-                    <span style={{fontSize:14,color:"#4a5568",marginLeft:4}}>{isOpen?"▲":"▼"}</span>
+                    <button onClick={()=>{setRenamingFolder(f.id);setRenameVal(f.name);}} style={{...iconBtnSty,fontSize:12,color:"var(--smed-muted)"}}>✎</button>
+                    <button onClick={()=>onDeleteFolder(f.id)} style={{...iconBtnSty,fontSize:12,color:T.archC}}>🗑</button>
+                    <span style={{fontSize:13,color:"var(--smed-muted)",marginLeft:4}}>{isOpen?"▲":"▼"}</span>
                   </div>
                 </div>
-                {/* Folder contents */}
                 {isOpen&&(
-                  <div style={{background:"#080A0F",border:`1px solid ${f.color}22`,borderTop:"none",borderRadius:"0 0 10px 10px",padding:10,display:"flex",flexDirection:"column",gap:8}}>
-                    {folderProjects.length===0?(
-                      <div style={{padding:"14px",textAlign:"center",fontSize:11,color:"#2A2D3A",letterSpacing:"0.08em"}}>
-                        No projects here yet — move boards into this folder using the 📁 button
-                      </div>
+                  <div style={{background:"var(--smed-bg)",border:`1px solid ${f.color}22`,borderTop:"none",borderRadius:"0 0 10px 10px",padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                    {fp.length===0?(
+                      <div style={{padding:14,textAlign:"center",fontSize:11,color:"var(--smed-muted)",letterSpacing:"0.08em"}}>No projects here yet — use 📁 on a board to move it here</div>
                     ):(
-                      folderProjects.map(p=>(
-                        <ProjectCard key={p.id} p={p} folders={folders}
-                          onOpen={onOpenProject} onDelete={onDeleteProject}
-                          onDuplicate={onDuplicateProject} onMoveToFolder={onMoveToFolder}/>
-                      ))
+                      fp.map(p=><ProjectCard key={p.id} p={p} folders={folders} T={T} onOpen={onOpenProject} onArchive={onArchiveProject} onDuplicate={onDuplicateProject} onMoveToFolder={onMoveToFolder}/>)
                     )}
                   </div>
                 )}
@@ -883,43 +926,109 @@ function HomePage({projects, folders, onStartNew, onOpenProject, onDeleteProject
           })}
 
           {/* Uncategorised */}
-          <div style={{marginBottom:12}}>
-            <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"#0D0F14",border:"1px solid #2A2D3A",borderRadius:uncategorised.length>0?"10px 10px 0 0":"10px"}}>
-              <div style={{width:32,height:32,background:"#2A2D3A33",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>📋</div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:13,fontWeight:700,color:"#9CA3AF"}}>Uncategorised</div>
-                <div style={{fontSize:9,color:"#4a5568",marginTop:1}}>{uncategorised.length} project{uncategorised.length!==1?"s":""}</div>
-              </div>
+          {(uncategorised.length>0||activeProjects.length===0)&&(
+            <div style={{marginBottom:10}}>
+              {folders.length>0&&(
+                <div style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",background:"var(--smed-card)",border:"1px solid var(--smed-b1)",borderRadius:uncategorised.length>0?"10px 10px 0 0":"10px"}}>
+                  <div style={{width:32,height:32,background:"var(--smed-b1)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>📋</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,fontWeight:700,color:"var(--smed-sub)"}}>Uncategorised</div>
+                    <div style={{fontSize:9,color:"var(--smed-muted)",marginTop:1}}>{uncategorised.length} project{uncategorised.length!==1?"s":""}</div>
+                  </div>
+                </div>
+              )}
+              {uncategorised.length>0&&(
+                <div style={{background:"var(--smed-bg)",border:"1px solid var(--smed-b1)",borderTop:folders.length>0?"none":"1px solid var(--smed-b1)",borderRadius:folders.length>0?"0 0 10px 10px":"10px",padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                  {uncategorised.map(p=><ProjectCard key={p.id} p={p} folders={folders} T={T} onOpen={onOpenProject} onArchive={onArchiveProject} onDuplicate={onDuplicateProject} onMoveToFolder={onMoveToFolder}/>)}
+                </div>
+              )}
             </div>
-            {uncategorised.length>0&&(
-              <div style={{background:"#080A0F",border:"1px solid #2A2D3A",borderTop:"none",borderRadius:"0 0 10px 10px",padding:10,display:"flex",flexDirection:"column",gap:8}}>
-                {uncategorised.map(p=>(
-                  <ProjectCard key={p.id} p={p} folders={folders}
-                    onOpen={onOpenProject} onDelete={onDeleteProject}
-                    onDuplicate={onDuplicateProject} onMoveToFolder={onMoveToFolder}/>
-                ))}
-              </div>
-            )}
-          </div>
+          )}
 
-          {projects.length===0&&!showNewFolder&&(
-            <div style={{padding:24,background:"#0D0F14",border:"1px solid #1E2130",borderRadius:12,color:"#4a5568",fontSize:12,textAlign:"center"}}>
-              No saved projects yet. Start a new board to create one.
+          {activeProjects.length===0&&!showNewFolder&&(
+            <div style={{padding:24,background:"var(--smed-card)",border:"1px solid var(--smed-b1)",borderRadius:12,color:"var(--smed-muted)",fontSize:12,textAlign:"center"}}>
+              No active projects. Start a new board or restore one from the archive below.
+            </div>
+          )}
+
+          {/* ── ARCHIVE SECTION ── */}
+          {archivedProjects.length>0&&(
+            <div style={{marginTop:20}}>
+              {/* Archive divider */}
+              <button onClick={()=>setShowArchive(v=>!v)}
+                style={{width:"100%",background:"none",border:"none",cursor:"pointer",padding:"4px 0 12px",fontFamily:"inherit",display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1,height:1,background:"var(--smed-b1)"}}/>
+                <span style={{fontSize:10,color:"var(--smed-muted)",letterSpacing:"0.12em",fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}>
+                  🗄 ARCHIVE · {archivedProjects.length} PROJECT{archivedProjects.length!==1?"S":""} {showArchive?"▲":"▼"}
+                </span>
+                <div style={{flex:1,height:1,background:"var(--smed-b1)"}}/>
+              </button>
+
+              {showArchive&&(
+                <div style={{display:"flex",flexDirection:"column",gap:8,animation:"fadeIn 0.2s ease"}}>
+                  {archivedProjects.map(p=>{
+                    const ops = p.operators||[];
+                    return (
+                      <div key={p.id} style={{background:"var(--smed-card)",border:"1px dashed var(--smed-b2)",borderRadius:10,opacity:0.82,transition:"opacity 0.2s"}}
+                        onMouseEnter={e=>e.currentTarget.style.opacity="1"}
+                        onMouseLeave={e=>e.currentTarget.style.opacity="0.82"}>
+                        <div style={{padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:13,fontWeight:600,color:"var(--smed-sub)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.name}</div>
+                            <div style={{fontSize:9,color:"var(--smed-muted)",marginTop:2}}>
+                              Archived {p.archivedAt ? new Date(p.archivedAt).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}) : ""} · {ops.length} operator{ops.length!==1?"s":""}
+                            </div>
+                          </div>
+                          <div style={{display:"flex",gap:6,flexShrink:0}}>
+                            <button onClick={()=>onRestoreProject(p.id)}
+                              style={{background:"var(--smed-card2)",border:`1px solid ${T.restoreC}`,color:T.restoreC,fontSize:11,fontFamily:"inherit",padding:"6px 12px",borderRadius:7,cursor:"pointer",fontWeight:600,letterSpacing:"0.04em"}}>
+                              ↩ Restore
+                            </button>
+                            <button onClick={()=>setConfirmDelete(p.id)}
+                              style={{background:T.archBtn,border:`1px solid ${T.archBord}`,color:T.archC,fontSize:11,fontFamily:"inherit",padding:"6px 12px",borderRadius:7,cursor:"pointer",fontWeight:600,letterSpacing:"0.04em"}}>
+                              ✕ Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
 
-      {/* Footer */}
-      <div style={{padding:"14px 22px",borderTop:"1px solid #1E2130",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6}}>
-        <span style={{fontSize:9,color:"#2A2D3A",letterSpacing:"0.1em"}}>SMED RUNNER · LEAN WAYS OF WORKING</span>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          {saveIndicator&&<span style={{fontSize:9,color:"#00B894",animation:"fadeIn 0.2s ease"}}>✓ Saved to database</span>}
-          {!saveIndicator&&dbReady&&<span style={{fontSize:9,color:"#2A2D3A"}}>🔗 Shared database · auto-syncs every 30s</span>}
-          <button onClick={onRefresh} title="Sync now" style={{...iconBtnSty,fontSize:10,color:"#4a5568",background:"#12141C",border:"1px solid #1E2130",borderRadius:5,padding:"4px 10px",letterSpacing:"0.08em"}}>
-            {syncing?"⏳":"↻"} SYNC
-          </button>
+      {/* ── PERMANENT DELETE CONFIRM ── */}
+      {confirmDelete&&(
+        <div style={{position:"fixed",inset:0,background:"#000d",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={()=>setConfirmDelete(null)}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"var(--smed-nav)",border:`1px solid ${T.archBord}`,borderRadius:14,width:"100%",maxWidth:360,padding:"24px",textAlign:"center"}}>
+            <div style={{fontSize:28,marginBottom:8}}>⚠️</div>
+            <div style={{fontSize:15,fontWeight:800,color:"var(--smed-text)",marginBottom:8}}>Permanently Delete?</div>
+            <div style={{fontSize:12,color:"var(--smed-sub)",lineHeight:1.6,marginBottom:20}}>
+              This cannot be undone. The project and all its tasks will be removed from the shared database forever.
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setConfirmDelete(null)}
+                style={{flex:1,padding:"11px",background:"var(--smed-card2)",border:"1px solid var(--smed-b2)",color:"var(--smed-body)",fontFamily:"inherit",fontSize:12,fontWeight:600,borderRadius:9,cursor:"pointer",letterSpacing:"0.06em"}}>
+                CANCEL
+              </button>
+              <button onClick={()=>{onDeleteProject(confirmDelete);setConfirmDelete(null);}}
+                style={{flex:1,padding:"11px",background:T.archBtn,border:`1px solid ${T.archBord}`,color:T.archC,fontFamily:"inherit",fontSize:12,fontWeight:700,borderRadius:9,cursor:"pointer",letterSpacing:"0.06em"}}>
+                YES, DELETE
+              </button>
+            </div>
+          </div>
         </div>
+      )}
+
+      {/* ── FOOTER ── */}
+      <div style={{padding:"12px 22px",borderTop:"1px solid var(--smed-b1)",background:"var(--smed-nav)",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:6,marginTop:"auto"}}>
+        <span style={{fontSize:9,color:"var(--smed-muted)",letterSpacing:"0.1em"}}>SMED RUNNER · LEAN WAYS OF WORKING</span>
+        <span style={{fontSize:9,color:dbReady?T.restoreC:"var(--smed-muted)"}}>
+          {dbReady?"🔗 Shared database · auto-syncs":"📵 Working offline"}
+        </span>
       </div>
     </div>
   );
@@ -933,14 +1042,25 @@ function SMEDAppInner() {
   const [folders, setFolders]    = useState([]);
   const [activeId,setActiveId]   = useState(null);
   const [loaded,setLoaded]       = useState(false);
-  const [dbReady,setDbReady]     = useState(true);  // false = tables not created yet
-  const [dbError,setDbError]     = useState(null);  // network error message
+  const [dbReady,setDbReady]     = useState(true);
+  const [dbError,setDbError]     = useState(null);
   const [screen,setScreen]       = useState("home");
+
+  // ── theme ─────────────────────────────────────────────────────────────────────
+  const [theme,setTheme] = useState(()=>{
+    try { return localStorage.getItem("smed_theme") || "dark"; } catch { return "dark"; }
+  });
+  const T = theme==="light" ? LIGHT_T : DARK_T;
+  useEffect(()=>{
+    try { localStorage.setItem("smed_theme",theme); } catch {}
+    document.documentElement.classList.toggle("light", theme==="light");
+  },[theme]);
   const [showWizard,setShowWizard]   = useState(false);
   const [showReport,setShowReport]   = useState(false);
   const [showAddTask,setShowAddTask] = useState(null);
-  const [waitPrompt,setWaitPrompt]   = useState(null); // {opId,index,minutes} | null
-  const [ctxMenu,setCtxMenu]         = useState(null); // {opId,taskId,index,x,y} | null
+  const [waitPrompt,setWaitPrompt]   = useState(null);
+  const [ctxMenu,setCtxMenu]         = useState(null);
+  const [editingTaskId,setEditingTaskId] = useState(null); // set by context menu → opens edit mode in TaskCard
   const [newTask,setNewTask]         = useState({name:"",duration:5,type:""});
   const [dragging,setDragging]       = useState(null);
   const [dragOver,setDragOver]       = useState(null);
@@ -1148,7 +1268,29 @@ function SMEDAppInner() {
     const p=projects.find(x=>x.id===id);
     if(p) setNewTask({name:"",duration:5,type:p.taskTypes[0]?.name||""});
   }
+
+  // ── archive / restore / permanent delete ─────────────────────────────────────
+  function archiveProject(id) {
+    setProjects(ps => {
+      const next = ps.map(p => p.id!==id ? p : {...p, archived:true, archivedAt:Date.now()});
+      const updated = next.find(p=>p.id===id);
+      if (updated && dbReady) sbUpsert("projects",[projectToRow(updated)]).catch(()=>{});
+      saveCache({projects:next, folders, activeId});
+      return next;
+    });
+    if(activeId===id){ setActiveId(null); setScreen("home"); }
+  }
+  function restoreProject(id) {
+    setProjects(ps => {
+      const next = ps.map(p => p.id!==id ? p : {...p, archived:false, archivedAt:null});
+      const updated = next.find(p=>p.id===id);
+      if (updated && dbReady) sbUpsert("projects",[projectToRow(updated)]).catch(()=>{});
+      saveCache({projects:next, folders, activeId});
+      return next;
+    });
+  }
   function deleteProject(id) {
+    // permanent delete (only available from archive)
     setProjects(ps => {
       const next = ps.filter(p=>p.id!==id);
       if (dbReady) sbDelete("projects",id).catch(()=>{});
@@ -1369,147 +1511,262 @@ function SMEDAppInner() {
     });
   }
 
-  // ── Export Gantt as PDF ─────────────────────────────────────────────────────
+  // ── Export Gantt as A3 Portrait PDF ─────────────────────────────────────────
   async function exportGanttPDF() {
     try {
       const JsPDF = await ensureJsPDF();
-      const doc = new JsPDF({ orientation:"landscape", unit:"mm", format:"a4" });
 
-      const PW = 277, PH = 190; // usable A4 landscape mm
-      const LEFT = 48, TOP = 28, BOTTOM = 20;
-      const chartH = PH - TOP - BOTTOM;
-      const chartW = PW - LEFT - 10;
-      const colW = chartW / operators.length;
-      const totalMin = maxTime + 2;
-      const pixPerMin = chartH / totalMin;
+      // ── A3 Portrait: 297 × 420mm ──────────────────────────────────────────────
+      const doc = new JsPDF({ orientation:"portrait", unit:"mm", format:"a3", compress:true });
 
-      // background
+      const PAGE_W = 297, PAGE_H = 420;
+
+      // Layout constants
+      const MARGIN_L = 14, MARGIN_R = 12, MARGIN_T = 10, MARGIN_B = 14;
+      const TITLE_H  = 30;   // title + subtitle block
+      const FOOTER_H = 18;   // legend + stats row
+      const HEADER_H = 14;   // operator column headers
+      const TIME_COL = 18;   // width of left-hand time ruler column
+
+      const chartX    = MARGIN_L + TIME_COL;
+      const chartY    = MARGIN_T + TITLE_H + HEADER_H;
+      const chartW    = PAGE_W - MARGIN_L - MARGIN_R - TIME_COL;
+      const chartH    = PAGE_H - MARGIN_T - TITLE_H - HEADER_H - FOOTER_H - MARGIN_B;
+      const totalMin  = maxTime + 1;          // +1 so last block isn't clipped
+      const ppm       = chartH / totalMin;    // pixels (mm) per minute — A3 gives ~5.5mm/min for 60min
+      const colW      = chartW / operators.length;
+
+      // ── Background ────────────────────────────────────────────────────────────
       doc.setFillColor(8, 10, 15);
-      doc.rect(0, 0, PW + 20, PH + 20, "F");
+      doc.rect(0, 0, PAGE_W, PAGE_H, "F");
 
-      // title
+      // ── Title block ───────────────────────────────────────────────────────────
+      // SMED Runner brand line
       doc.setFont("helvetica","bold");
-      doc.setFontSize(14);
-      doc.setTextColor(255, 255, 255);
-      doc.text("SMED RUNNER — GANTT CHART", 10, 10);
-      doc.setFontSize(8);
-      doc.setTextColor(74, 85, 104);
-      doc.text(activeProject.name, 10, 16);
-      doc.text(new Date().toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"}), 10, 21);
+      doc.setFontSize(9);
+      doc.setTextColor(255, 107, 53);
+      doc.text("SMED RUNNER", MARGIN_L + TIME_COL, MARGIN_T + 6);
 
-      // time axis labels
-      doc.setFontSize(7);
-      doc.setTextColor(74, 85, 104);
-      for (let t = 0; t <= totalMin; t += 5) {
-        const y = TOP + (t / totalMin) * chartH;
-        doc.text(t + "m", LEFT - 8, y + 1);
+      // Project name (large)
+      doc.setFontSize(16);
+      doc.setTextColor(255, 255, 255);
+      const projectLabel = activeProject.name.length > 48 ? activeProject.name.slice(0, 47) + "…" : activeProject.name;
+      doc.text(projectLabel, MARGIN_L + TIME_COL, MARGIN_T + 16);
+
+      // Date + stats line
+      doc.setFont("helvetica","normal");
+      doc.setFontSize(8);
+      doc.setTextColor(138, 148, 168);
+      const dateStr  = new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+      const statsStr = `Operators: ${operators.length}   Max time: ${fmtMin(maxTime)}   Efficiency: ${efficiency}%`;
+      doc.text(dateStr, MARGIN_L + TIME_COL, MARGIN_T + 23);
+      doc.text(statsStr, PAGE_W - MARGIN_R - doc.getTextWidth(statsStr), MARGIN_T + 23);
+
+      // Divider under title
+      doc.setDrawColor(37, 42, 56);
+      doc.setLineWidth(0.3);
+      doc.line(MARGIN_L, MARGIN_T + TITLE_H - 2, PAGE_W - MARGIN_R, MARGIN_T + TITLE_H - 2);
+
+      // ── Time ruler (left column) ──────────────────────────────────────────────
+      const tickInterval = totalMin <= 15 ? 1 : totalMin <= 40 ? 5 : totalMin <= 80 ? 10 : 15;
+      doc.setFont("helvetica","normal");
+      for (let t = 0; t <= totalMin; t += tickInterval) {
+        const y = chartY + (t / totalMin) * chartH;
+        // label
+        doc.setFontSize(7);
+        doc.setTextColor(90, 96, 112);
+        const lbl = fmtMin(t);
+        doc.text(lbl, MARGIN_L + TIME_COL - 3 - doc.getTextWidth(lbl), y + 1);
+        // gridline across full chart
         doc.setDrawColor(30, 33, 48);
-        doc.setLineWidth(0.2);
-        doc.line(LEFT, y, LEFT + chartW, y);
+        doc.setLineWidth(t % (tickInterval * 2) === 0 ? 0.3 : 0.15);
+        doc.line(chartX, y, chartX + chartW, y);
       }
 
-      // target line (fastest operator)
-      const targetY = TOP + (minTime / totalMin) * chartH;
-      doc.setDrawColor(0, 184, 148, 0.4);
-      doc.setLineWidth(0.4);
-      doc.setLineDashPattern([2, 2], 0);
-      doc.line(LEFT, targetY, LEFT + chartW, targetY);
-      doc.setLineDashPattern([], 0);
-
-      // operator columns
+      // ── Operator column headers ────────────────────────────────────────────────
+      const headerY = MARGIN_T + TITLE_H;
       operators.forEach((op, opIdx) => {
-        const x = LEFT + opIdx * colW;
+        const x = chartX + opIdx * colW;
         const opColor = OP_COLORS[opIdx % 10];
         const r = parseInt(opColor.slice(1,3),16);
         const g = parseInt(opColor.slice(3,5),16);
         const b = parseInt(opColor.slice(5,7),16);
+        const opTotalMin = op.tasks.reduce((s,t) => s + t.duration, 0);
+        const isBottleneckOp = opTotalMin === maxTime && maxTime > 1 && op.tasks.length > 0;
 
-        // column bg alternating
-        if (opIdx % 2 === 0) {
-          doc.setFillColor(13, 15, 20);
-          doc.rect(x, TOP, colW, chartH, "F");
+        // header bg
+        doc.setFillColor(r, g, b, 0.18);
+        doc.rect(x, headerY, colW, HEADER_H, "F");
+
+        // bottleneck badge background
+        if (isBottleneckOp) {
+          doc.setFillColor(255, 107, 53, 0.3);
+          doc.rect(x, headerY, colW, HEADER_H, "F");
         }
 
-        // operator header
-        doc.setFillColor(r, g, b, 0.15);
-        doc.rect(x, TOP - 10, colW, 10, "F");
+        // operator name
         doc.setFont("helvetica","bold");
         doc.setFontSize(8);
         doc.setTextColor(r, g, b);
-        doc.text(op.name.slice(0, 14), x + 2, TOP - 3);
-        const opTime = op.tasks.reduce((s,t) => s+t.duration, 0);
-        doc.setFontSize(7);
-        doc.text(opTime + "m", x + colW - 8, TOP - 3);
+        const nameLimit = Math.floor((colW - 16) / 1.9);
+        const opLabel = op.name.length > nameLimit ? op.name.slice(0, nameLimit - 1) + "…" : op.name;
+        doc.text(opLabel, x + 2.5, headerY + 6);
 
-        // task blocks
+        // time + bottleneck tag
+        doc.setFontSize(7.5);
+        const timeLabel = fmtMin(opTotalMin);
+        doc.text(timeLabel, x + colW - 2.5 - doc.getTextWidth(timeLabel), headerY + 6);
+
+        // work vs wait breakdown (small line under name)
+        const workT = op.tasks.filter(t=>!t.isWait).reduce((s,t)=>s+t.duration,0);
+        const waitT = op.tasks.filter(t=>t.isWait).reduce((s,t)=>s+t.duration,0);
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(6);
+        doc.setTextColor(138, 148, 168);
+        const breakdown = waitT > 0 ? `${fmtMin(workT)} work · ${fmtMin(waitT)} wait` : `${fmtMin(workT)} work`;
+        doc.text(breakdown, x + 2.5, headerY + 11);
+
+        if (isBottleneckOp) {
+          doc.setFont("helvetica","bold");
+          doc.setFontSize(5.5);
+          doc.setTextColor(255, 107, 53);
+          doc.text("▼ SLOWEST", x + colW - 2.5 - doc.getTextWidth("▼ SLOWEST"), headerY + 11);
+        }
+      });
+
+      // ── Target / fastest finish dashed line ─────────────────────────────────
+      if (minTime > 0 && minTime < maxTime) {
+        const targetY = chartY + (minTime / totalMin) * chartH;
+        doc.setDrawColor(0, 217, 163, 0.7);
+        doc.setLineWidth(0.5);
+        doc.setLineDashPattern([3, 2], 0);
+        doc.line(chartX, targetY, chartX + chartW, targetY);
+        doc.setLineDashPattern([], 0);
+        doc.setFontSize(6);
+        doc.setFont("helvetica","italic");
+        doc.setTextColor(0, 217, 163);
+        doc.text(`target ${fmtMin(minTime)}`, chartX + chartW + 1, targetY + 1);
+      }
+
+      // ── Column backgrounds + task blocks ─────────────────────────────────────
+      operators.forEach((op, opIdx) => {
+        const x = chartX + opIdx * colW;
+
+        // alternating column shade
+        if (opIdx % 2 === 0) {
+          doc.setFillColor(13, 15, 20);
+          doc.rect(x, chartY, colW, chartH, "F");
+        }
+
+        // left column border
+        doc.setDrawColor(30, 33, 48);
+        doc.setLineWidth(0.25);
+        doc.line(x, chartY, x, chartY + chartH);
+
+        // tasks
         let cursor = 0;
         op.tasks.forEach(task => {
-          const ty = TOP + (cursor / totalMin) * chartH;
-          const th = (task.duration / totalMin) * chartH;
+          const ty  = chartY + (cursor / totalMin) * chartH;
+          const th  = (task.duration / totalMin) * chartH;
+          cursor   += task.duration;
+
           const isWait = task.isWait;
-          const tt = isWait ? { color: WAIT_COLOR } : (taskTypes.find(t => t.name === task.type) || { color:"#999999" });
-          const tc = tt.color;
+          const tt  = isWait ? { color: WAIT_COLOR } : (taskTypes.find(t => t.name === task.type) || { color:"#888888" });
+          const tc  = tt.color;
           const tr2 = parseInt(tc.slice(1,3),16);
           const tg2 = parseInt(tc.slice(3,5),16);
           const tb2 = parseInt(tc.slice(5,7),16);
+          const blockH = Math.max(th - 0.8, 0.8);
 
-          // block fill (waits are lighter/dashed-look)
-          doc.setFillColor(tr2, tg2, tb2, isWait ? 0.25 : 0.5);
-          doc.setDrawColor(tr2, tg2, tb2);
-          doc.setLineWidth(isWait ? 0.5 : 0.3);
-          doc.roundedRect(x + 1, ty + 0.5, colW - 2, Math.max(th - 1, 1.5), 1, 1, "FD");
+          if (isWait) {
+            // hatched wait block
+            doc.setFillColor(tr2, tg2, tb2, 0.18);
+            doc.setDrawColor(tr2, tg2, tb2, 0.6);
+            doc.setLineWidth(0.4);
+            doc.roundedRect(x + 1, ty + 0.4, colW - 2, blockH, 0.8, 0.8, "FD");
+            // diagonal hatch lines inside
+            const hatchStep = 3;
+            doc.setDrawColor(tr2, tg2, tb2, 0.35);
+            doc.setLineWidth(0.2);
+            for (let hx = x + 1; hx < x + colW - 1 + blockH; hx += hatchStep) {
+              const x1 = Math.max(hx, x + 1),        y1 = ty + 0.4 + Math.max(0, hx - (x + 1));
+              const x2 = Math.min(hx - blockH, x + colW - 1), y2 = ty + 0.4 + blockH;
+              if (x2 > x1) doc.line(x1, y1, x2, Math.min(y2, ty + 0.4 + blockH));
+            }
+          } else {
+            // solid task block
+            doc.setFillColor(tr2, tg2, tb2, 0.55);
+            doc.setDrawColor(tr2, tg2, tb2, 0.9);
+            doc.setLineWidth(0.3);
+            doc.roundedRect(x + 1, ty + 0.4, colW - 2, blockH, 0.8, 0.8, "FD");
+          }
 
-          // task name (clip to block height)
-          if (th > 4) {
-            doc.setFont("helvetica", isWait ? "italic" : "normal");
-            doc.setFontSize(Math.min(6.5, th * 0.5));
+          // Task name — show when block is tall enough
+          if (th >= 3.5) {
+            doc.setFont("helvetica", isWait ? "italic" : "bold");
+            const nameFontSize = Math.min(7, Math.max(5, th * 0.45));
+            doc.setFontSize(nameFontSize);
             doc.setTextColor(255, 255, 255);
-            const maxChars = Math.floor((colW - 4) / 1.8);
-            const rawLabel = isWait ? "Waiting" : task.name;
-            const label = rawLabel.length > maxChars ? rawLabel.slice(0, maxChars - 1) + "…" : rawLabel;
-            doc.text(label, x + 2.5, ty + Math.min(th * 0.45, 4));
+            const maxCh = Math.floor((colW - 5) / (nameFontSize * 0.52));
+            const rawName = isWait ? "⏸ Waiting" : task.name;
+            const nameClipped = rawName.length > maxCh ? rawName.slice(0, maxCh - 1) + "…" : rawName;
+            doc.text(nameClipped, x + 2.5, ty + Math.min(blockH * 0.52, nameFontSize * 0.45 + 1.5));
           }
-          if (th > 7) {
-            doc.setFontSize(5.5);
+
+          // Duration label — show when there's room
+          if (th >= 6) {
+            doc.setFont("helvetica","normal");
+            doc.setFontSize(Math.min(6.5, th * 0.35));
             doc.setTextColor(tr2, tg2, tb2);
-            doc.text(task.duration + "m", x + 2.5, ty + Math.min(th * 0.75, 7));
+            const durLbl = fmtMin(task.duration);
+            doc.text(durLbl, x + 2.5, ty + Math.min(blockH * 0.82, blockH - 1.5));
           }
-
-          cursor += task.duration;
         });
-
-        // column separator
-        doc.setDrawColor(30, 33, 48);
-        doc.setLineWidth(0.3);
-        doc.line(x, TOP - 10, x, TOP + chartH);
       });
 
-      // outer border
-      doc.setDrawColor(42, 45, 58);
+      // Right border of chart
+      doc.setDrawColor(37, 42, 56);
       doc.setLineWidth(0.4);
-      doc.rect(LEFT, TOP - 10, chartW, chartH + 10);
+      doc.line(chartX + chartW, chartY, chartX + chartW, chartY + chartH);
+      // Top and bottom borders
+      doc.line(chartX, chartY, chartX + chartW, chartY);
+      doc.line(chartX, chartY + chartH, chartX + chartW, chartY + chartH);
 
-      // legend
-      let lx = LEFT;
-      const ly = TOP + chartH + 6;
-      doc.setFontSize(6);
+      // ── Footer: legend + branding ─────────────────────────────────────────────
+      const footerY = chartY + chartH + 6;
+      let lx = chartX;
+
+      // Task type legend
+      doc.setFont("helvetica","bold");
+      doc.setFontSize(6.5);
       taskTypes.forEach(tt => {
         const r3 = parseInt(tt.color.slice(1,3),16);
         const g3 = parseInt(tt.color.slice(3,5),16);
         const b3 = parseInt(tt.color.slice(5,7),16);
         doc.setFillColor(r3, g3, b3);
-        doc.rect(lx, ly - 2, 4, 4, "F");
-        doc.setTextColor(180,180,180);
-        doc.text(tt.name, lx + 5, ly + 1);
-        lx += doc.getTextWidth(tt.name) + 12;
+        doc.roundedRect(lx, footerY, 5, 4, 0.5, 0.5, "F");
+        doc.setTextColor(200, 206, 218);
+        doc.text(tt.name, lx + 6.5, footerY + 3.2);
+        lx += doc.getTextWidth(tt.name) + 14;
       });
 
-      // efficiency watermark
-      doc.setFontSize(9);
-      doc.setTextColor(74, 85, 104);
-      doc.text(`Efficiency: ${efficiency}%   Max: ${maxTime}m   Operators: ${operators.length}`, PW - 60, PH - 3);
+      // Wait legend
+      const wr = parseInt(WAIT_COLOR.slice(1,3),16), wg = parseInt(WAIT_COLOR.slice(3,5),16), wb2 = parseInt(WAIT_COLOR.slice(5,7),16);
+      doc.setFillColor(wr, wg, wb2, 0.35);
+      doc.setDrawColor(wr, wg, wb2);
+      doc.setLineWidth(0.3);
+      doc.roundedRect(lx, footerY, 5, 4, 0.5, 0.5, "FD");
+      doc.setFont("helvetica","normal");
+      doc.setTextColor(200, 206, 218);
+      doc.text("⏸ Waiting / Downtime", lx + 6.5, footerY + 3.2);
 
-      doc.save(`${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_gantt.pdf`);
+      // Branding bottom-right
+      doc.setFont("helvetica","italic");
+      doc.setFontSize(6);
+      doc.setTextColor(42, 48, 64);
+      doc.text("Generated by SMED Runner · smed-runner.vercel.app", PAGE_W - MARGIN_R - doc.getTextWidth("Generated by SMED Runner · smed-runner.vercel.app"), PAGE_H - 5);
+
+      doc.save(`${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_gantt_A3.pdf`);
     } catch (err) {
       alert("PDF export failed: " + err.message);
     }
@@ -1523,46 +1780,39 @@ function SMEDAppInner() {
 
       // one sheet per operator
       operators.forEach((op, i) => {
+        const typeOptions = taskTypes.map(t=>t.name).join(", ");
         const rows = [
           ["SMED RUNNER — TASK IMPORT TEMPLATE"],
           ["Operator:", op.name],
           ["Project:", activeProject.name],
           [""],
-          ["Task Name", "Task Time (min)", "Task Type"],
-          ["", "", ""],
-          ...op.tasks.map(t => [t.name, t.duration, t.type]),
-          // blank rows for user to fill
-          ...Array(10).fill(["", "", ""]),
+          ["Task Name", "Task Time (min)", "Task Type", "Task Time (sec)"],   // header
+          [`Task Types: ${typeOptions}  |  Use EITHER minutes (col B) OR seconds (col D) — leave the other blank`, "", "", ""],  // instruction
+          ...op.tasks.map(t => [
+            t.isWait ? "WAITING" : t.name,
+            t.isWait ? "" : (t.duration >= 1 ? t.duration : ""),    // minutes — blank for sub-minute tasks
+            t.isWait ? "WAIT" : t.type,
+            t.duration < 1 ? Math.round(t.duration * 60) : "",      // seconds — filled for sub-minute tasks
+          ]),
+          ...Array(10).fill(["", "", "", ""]),
         ];
         const ws = XLSX.utils.aoa_to_sheet(rows);
-
-        // column widths
-        ws["!cols"] = [{ wch: 40 }, { wch: 18 }, { wch: 20 }];
-
-        // header note in cell A1 styling (SheetJS community doesn't do rich styles,
-        // but we embed a note)
-        ws["A1"] = { v: "SMED RUNNER — TASK IMPORT TEMPLATE", t:"s" };
-        ws["A5"] = { v: "Task Name",         t:"s" };
-        ws["B5"] = { v: "Task Time (min)",   t:"s" };
-        ws["C5"] = { v: "Task Type",         t:"s" };
-
-        // instruction row
-        ws["A6"] = { v: `Fill rows below. Task Type options: ${taskTypes.map(t=>t.name).join(", ")}`, t:"s" };
+        ws["!cols"] = [{ wch: 50 }, { wch: 16 }, { wch: 18 }, { wch: 16 }];
         XLSX.utils.book_append_sheet(wb, ws, op.name.slice(0, 31));
       });
 
-      // also add a blank "New Operator" template sheet
+      const typeOptions = taskTypes.map(t=>t.name).join(", ");
       const blankRows = [
         ["SMED RUNNER — TASK IMPORT TEMPLATE"],
         ["Operator:", "Enter Operator Name Here"],
         ["Project:", activeProject.name],
         [""],
-        ["Task Name", "Task Time (min)", "Task Type"],
-        [`Fill rows below. Task Type options: ${taskTypes.map(t=>t.name).join(", ")}`, "", ""],
-        ...Array(15).fill(["", "", ""]),
+        ["Task Name", "Task Time (min)", "Task Type", "Task Time (sec)"],
+        [`Task Types: ${typeOptions}  |  Use EITHER minutes (col B) OR seconds (col D) — leave the other blank`, "", "", ""],
+        ...Array(15).fill(["", "", "", ""]),
       ];
       const blankWs = XLSX.utils.aoa_to_sheet(blankRows);
-      blankWs["!cols"] = [{ wch: 40 }, { wch: 18 }, { wch: 20 }];
+      blankWs["!cols"] = [{ wch: 50 }, { wch: 16 }, { wch: 18 }, { wch: 16 }];
       XLSX.utils.book_append_sheet(wb, blankWs, "New Operator");
 
       XLSX.writeFile(wb, `${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_tasks_template.xlsx`);
@@ -1571,7 +1821,41 @@ function SMEDAppInner() {
     }
   }
 
-  // ── Import Excel ───────────────────────────────────────────────────────────
+  // ── Export Flat List (.xlsx) ───────────────────────────────────────────────
+  // One row per task, all operators in sequence.
+  // Columns: Operator Name | Task Name | Task Time (sec) | Task Type | Validation True?
+  async function exportFlatList() {
+    try {
+      const XLSX = await ensureXLSX();
+      const wb = XLSX.utils.book_new();
+
+      // Header row
+      const rows = [
+        ["Operator Name", "Task Name", "Task Time (sec)", "Task Type", "Validation True?"]
+      ];
+
+      // One row per task, all of operator 1 then operator 2 etc.
+      operators.forEach(op => {
+        op.tasks.forEach(task => {
+          const taskName   = task.isWait ? "Waiting / Downtime" : task.name;
+          const taskType   = task.isWait ? "Wait" : task.type;
+          const taskSec    = Math.round(task.duration * 60); // decimal minutes → whole seconds
+          const validated  = taskType === "Validated" ? "TRUE" : "FALSE";
+          rows.push([op.name, taskName, taskSec, taskType, validated]);
+        });
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+
+      // Column widths: Operator Name, Task Name, Time (sec), Task Type, Validation
+      ws["!cols"] = [{ wch:22 }, { wch:48 }, { wch:16 }, { wch:18 }, { wch:16 }];
+
+      XLSX.utils.book_append_sheet(wb, ws, "Tasks");
+      XLSX.writeFile(wb, `${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_flat_list.xlsx`);
+    } catch (err) {
+      alert("Flat list export failed: " + err.message);
+    }
+  }
   async function importExcel(file) {
     try {
       const XLSX = await ensureXLSX();
@@ -1588,20 +1872,49 @@ function SMEDAppInner() {
         const opNameRaw = String(rows[1]?.[1] || "").trim();
         if (!opNameRaw || opNameRaw.toLowerCase().includes("enter operator")) return;
 
-        // find data rows — header is row 5 (index 4), data starts row 7 (index 6)
-        const dataStart = 6;
+        // ── find header row dynamically ──────────────────────────────────────────
+        // Look for the row containing "Task Name" in column A (case-insensitive)
+        // Tasks start on the NEXT row after it.
+        let dataStart = -1;
+        for (let i = 0; i < rows.length; i++) {
+          if (String(rows[i]?.[0] || "").toLowerCase().includes("task name")) {
+            dataStart = i + 1;
+            break;
+          }
+        }
+        if (dataStart === -1) dataStart = 6; // fallback for any unknown format
+
         const imported = [];
 
         for (let i = dataStart; i < rows.length; i++) {
           const row = rows[i];
-          const name = String(row[0] || "").trim();
-          const durRaw = Number(row[1]);
+          const name    = String(row[0] || "").trim();
+          const durMin  = Number(row[1]);    // column B: minutes
           const typeRaw = String(row[2] || "").trim();
+          const durSec  = Number(row[3]);    // column D: seconds (optional)
+
+          // Skip: empty name
           if (!name) continue;
-          const duration = isNaN(durRaw) || durRaw <= 0 ? 5 : Math.round(durRaw);
-          // match type or use first
+
+          // Resolve duration: seconds column takes priority over minutes column
+          let duration;
+          if (!isNaN(durSec) && durSec > 0) {
+            duration = durSec / 60;          // convert seconds → decimal minutes
+          } else if (!isNaN(durMin) && durMin > 0) {
+            duration = durMin;               // already in minutes (can be decimal)
+          } else {
+            continue;                        // no valid duration — skip (catches instruction rows)
+          }
+
+          // Handle WAIT blocks exported as "WAITING"
+          if (typeRaw.toUpperCase() === "WAIT" || name.toUpperCase() === "WAITING") {
+            imported.push({ id: uid(), name: "Waiting / Downtime", duration, type:"__WAIT__", isWait:true });
+            continue;
+          }
+
+          // match type or use first available
           const matchedType = taskTypes.find(t => t.name.toLowerCase() === typeRaw.toLowerCase());
-          const type = matchedType ? matchedType.name : taskTypes[0]?.name || "Validated";
+          const type = matchedType ? matchedType.name : (taskTypes[0]?.name || "Validated");
           imported.push({ id: uid(), name, duration, type });
         }
 
@@ -1723,10 +2036,11 @@ create policy "public_all_projects" on projects
         )}
         <HomePage projects={projects} folders={folders} onStartNew={()=>setShowWizard(true)} onContinue={()=>{}}
           onOpenProject={openProject} onDeleteProject={deleteProject} onDuplicateProject={duplicateProject}
+          onArchiveProject={archiveProject} onRestoreProject={restoreProject}
           onMoveToFolder={moveToFolder} onCreateFolder={createFolder}
           onDeleteFolder={deleteFolder} onRenameFolder={renameFolder}
           saveIndicator={saveIndicator} syncing={syncing} onRefresh={manualRefresh} dbReady={dbReady}
-          onStartDemo={startDemo}/>
+          onStartDemo={startDemo} theme={theme} setTheme={setTheme} T={T}/>
       </div>
     </>
   );
@@ -1735,7 +2049,7 @@ create policy "public_all_projects" on projects
   if(!activeProject) return null;
 
   return (
-    <div style={{minHeight:"100vh",background:"#0B0E15",color:"#E8EDF5",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
+    <div style={{minHeight:"100vh",background:"var(--smed-bg)",color:"var(--smed-body)",fontFamily:"'DM Mono','Courier New',monospace",display:"flex",flexDirection:"column"}}>
       <style>{globalCSS}</style>
       {showReport&&<ReportPanel operators={operators} taskTypes={taskTypes} onClose={()=>setShowReport(false)}/>}
 
@@ -1746,15 +2060,19 @@ create policy "public_all_projects" on projects
             style={{position:"fixed",inset:0,zIndex:340}}/>
           <div style={{position:"fixed",zIndex:341,
             left:Math.min(ctxMenu.x, (typeof window!=="undefined"?window.innerWidth:400)-200),
-            top:Math.min(ctxMenu.y, (typeof window!=="undefined"?window.innerHeight:600)-220),
-            background:"#0D0F14",border:"1px solid #2E3445",borderRadius:10,padding:6,minWidth:184,boxShadow:"0 8px 28px #000c"}}>
+            top:Math.min(ctxMenu.y, (typeof window!=="undefined"?window.innerHeight:600)-240),
+            background:"#0D0F14",border:"1px solid #2E3445",borderRadius:10,padding:6,minWidth:190,boxShadow:"0 8px 28px #000c"}}>
             <div style={{fontSize:9,color:"#5a6478",letterSpacing:"0.12em",padding:"4px 8px"}}>TASK ACTIONS</div>
+            <button onClick={()=>{ setEditingTaskId(ctxMenu.taskId); setCtxMenu(null); }}
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"transparent",color:"#C0C8D8",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left",marginBottom:2}}>
+              ✎ Edit task
+            </button>
             <button onClick={()=>requestWait(ctxMenu.opId, ctxMenu.index)}
-              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.12)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left",marginBottom:3}}>
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.1)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left",marginBottom:2}}>
               ⏸ Add wait ABOVE
             </button>
             <button onClick={()=>requestWait(ctxMenu.opId, ctxMenu.index+1)}
-              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.12)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left"}}>
+              style={{display:"flex",alignItems:"center",gap:8,padding:"8px",borderRadius:6,background:"rgba(255,107,53,0.1)",color:"#FF6B35",fontSize:11,fontWeight:600,border:"none",cursor:"pointer",width:"100%",fontFamily:"inherit",textAlign:"left"}}>
               ⏸ Add wait BELOW
             </button>
             <div style={{height:1,background:"#252A38",margin:"5px 0"}}/>
@@ -1866,7 +2184,7 @@ create policy "public_all_projects" on projects
                   <div style={{width:32,height:32,background:"#FF6B3522",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>📄</div>
                   <div>
                     <div style={{fontSize:12,fontWeight:700,color:"#FFF"}}>Gantt Chart PDF</div>
-                    <div style={{fontSize:10,color:"#4a5568",marginTop:1}}>Full visual timeline exported to A4 landscape</div>
+                    <div style={{fontSize:10,color:"#4a5568",marginTop:1}}>Full visual timeline — A3 portrait, high quality</div>
                   </div>
                 </div>
                 <Btn onClick={()=>{ exportGanttPDF(); setShowExport(false); }} color="#FF6B35" full>↓ EXPORT GANTT PDF</Btn>
@@ -1882,6 +2200,18 @@ create policy "public_all_projects" on projects
                   </div>
                 </div>
                 <Btn onClick={()=>{ exportExcelTemplate(); }} color="#00B894" full>↓ DOWNLOAD TEMPLATE (.xlsx)</Btn>
+              </div>
+
+              {/* Flat list export */}
+              <div style={{background:"#080A0F",border:"1px solid #1E2130",borderRadius:10,padding:"14px 16px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                  <div style={{width:32,height:32,background:"#6C5CE722",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>📋</div>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#FFF"}}>Flat Task List</div>
+                    <div style={{fontSize:10,color:"#4a5568",marginTop:1}}>Operator · Task · Time (sec) · Type · Validation — ready to upload elsewhere</div>
+                  </div>
+                </div>
+                <Btn onClick={()=>{ exportFlatList(); setShowExport(false); }} color="#6C5CE7" full>↓ EXPORT FLAT LIST (.xlsx)</Btn>
               </div>
 
               {/* Excel import */}
@@ -1976,13 +2306,12 @@ create policy "public_all_projects" on projects
       )}
 
       {/* ── HEADER ── */}
-      <div style={{background:"#11141D",borderBottom:"1px solid #252A38",padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,gap:8,flexWrap:"wrap"}}>
+      <div style={{background:"var(--smed-nav)",borderBottom:"1px solid var(--smed-b1)",padding:"12px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100,gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <button onClick={()=>{ if(demoProject){exitDemo();} else {setScreen("home");} }} style={{...iconBtnSty,fontSize:12,color:"#C0C8D8",letterSpacing:"0.1em",padding:"7px 12px",background:"#1A1F2B",border:"1px solid #2E3445",borderRadius:7,fontWeight:600}}>
+          <button onClick={()=>{ if(demoProject){exitDemo();} else {setScreen("home");} }} style={{...iconBtnSty,fontSize:12,color:"var(--smed-body)",letterSpacing:"0.1em",padding:"7px 12px",background:"var(--smed-card2)",border:"1px solid var(--smed-b3)",borderRadius:7,fontWeight:600}}>
             ← HOME
           </button>
-          <div style={{display:"none"}}><Logo/></div>
-          <div style={{fontSize:15,fontWeight:700,color:"#FFFFFF",letterSpacing:"0.03em",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+          <div style={{fontSize:15,fontWeight:700,color:"var(--smed-text)",letterSpacing:"0.03em",maxWidth:220,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
             {activeProject.folderId && folders.find(f=>f.id===activeProject.folderId) && (
               <span style={{color:folders.find(f=>f.id===activeProject.folderId).color,fontSize:10,marginRight:6}}>
                 {folders.find(f=>f.id===activeProject.folderId).icon} {folders.find(f=>f.id===activeProject.folderId).name} ›
@@ -1992,35 +2321,41 @@ create policy "public_all_projects" on projects
           </div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
-          <button onClick={()=>setShowReport(true)} style={{...iconBtnSty,fontSize:10,color:"#9CA3AF",background:"#12141C",border:"1px solid #1E2130",borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em"}}>📊 REPORT</button>
-          <button onClick={()=>setShowExport(true)} style={{...iconBtnSty,fontSize:10,color:"#9CA3AF",background:"#12141C",border:"1px solid #1E2130",borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em"}}>↓ EXPORT</button>
-          <button onClick={manualRefresh} title="Sync with shared database" style={{...iconBtnSty,fontSize:10,color:saveIndicator?"#00B894":"#4a5568",background:"#12141C",border:`1px solid ${saveIndicator?"#00B89444":"#1E2130"}`,borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em",transition:"all 0.3s"}}>
-            {syncing?"⏳ SYNCING…":saveIndicator?"✓ SAVED":"↻ SYNC"}
+          <button onClick={()=>setShowReport(true)} style={{...iconBtnSty,fontSize:10,color:"var(--smed-sub)",background:"var(--smed-card2)",border:"1px solid var(--smed-b1)",borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em"}}>📊 REPORT</button>
+          <button onClick={()=>setShowExport(true)} style={{...iconBtnSty,fontSize:10,color:"var(--smed-sub)",background:"var(--smed-card2)",border:"1px solid var(--smed-b1)",borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em"}}>↓ EXPORT</button>
+          <button onClick={manualRefresh} title="Sync" style={{...iconBtnSty,fontSize:10,color:saveIndicator?"#00B894":"var(--smed-muted)",background:"var(--smed-card2)",border:`1px solid ${saveIndicator?"#00B89444":"var(--smed-b1)"}`,borderRadius:6,padding:"6px 10px",letterSpacing:"0.08em",transition:"all 0.3s"}}>
+            {syncing?"⏳":saveIndicator?"✓ SAVED":"↻ SYNC"}
           </button>
-          <div style={{display:"flex",background:"#12141C",border:"1px solid #1E2130",borderRadius:6,overflow:"hidden"}}>
+          {/* Theme toggle */}
+          <div style={{display:"flex",background:"var(--smed-card2)",border:"1px solid var(--smed-b1)",borderRadius:16,padding:2,gap:2}}>
+            {[["dark","◑"],["light","☀"]].map(([m,l])=>(
+              <button key={m} onClick={()=>setTheme(m)} style={{background:theme===m?"#FF6B35":"transparent",color:theme===m?"#fff":"var(--smed-sub)",border:"none",fontFamily:"inherit",fontSize:11,fontWeight:theme===m?700:400,padding:"3px 9px",borderRadius:12,cursor:"pointer",transition:"all 0.18s"}}>{l}</button>
+            ))}
+          </div>
+          <div style={{display:"flex",background:"var(--smed-card2)",border:"1px solid var(--smed-b1)",borderRadius:6,overflow:"hidden"}}>
             {[["plan","PLAN"],["run","▶ RUN"]].map(([v,l])=>(
-              <button key={v} onClick={()=>{setPhase(v);resetRun();}} style={{padding:"6px 12px",fontSize:10,fontFamily:"inherit",background:phase===v?(v==="run"?"#4ECDC4":"#FF6B35"):"transparent",color:phase===v?"#0D0F14":"#4a5568",border:"none",cursor:"pointer",letterSpacing:"0.08em",fontWeight:phase===v?700:400,transition:"all 0.15s"}}>{l}</button>
+              <button key={v} onClick={()=>{setPhase(v);resetRun();}} style={{padding:"6px 12px",fontSize:10,fontFamily:"inherit",background:phase===v?(v==="run"?"#4ECDC4":"#FF6B35"):"transparent",color:phase===v?"#0D0F14":"var(--smed-muted)",border:"none",cursor:"pointer",letterSpacing:"0.08em",fontWeight:phase===v?700:400,transition:"all 0.15s"}}>{l}</button>
             ))}
           </div>
         </div>
       </div>
 
       {/* ── STATS BAR ── */}
-      <div style={{display:"flex",background:"#11141D",borderBottom:"1px solid #252A38",overflowX:"auto",flexShrink:0}}>
+      <div style={{display:"flex",background:"var(--smed-nav)",borderBottom:"1px solid var(--smed-b1)",overflowX:"auto",flexShrink:0}}>
         {[
-          ["OPERATORS",operators.length,"#4ECDC4"],
+          ["OPERATORS",operators.length,T.opsColor],
           ["TASKS",operators.reduce((s,o)=>s+o.tasks.length,0),"#FFD93D"],
-          ["MAX TIME",maxTime+"m","#FF6B35"],
-          ["EFFICIENCY",efficiency+"%",efficiency>85?"#00D9A3":efficiency>60?"#FFD93D":"#E17055"],
+          ["MAX TIME",fmtMin(maxTime),"#FF6B35"],
+          ["EFFICIENCY",efficiency+"%",efficiency>85?"#00D9A3":efficiency>60?T.effColor:"#E17055"],
         ].map(([l,v,c])=>(
-          <div key={l} style={{padding:"10px 20px",borderRight:"1px solid #252A38",flexShrink:0}}>
-            <div style={{fontSize:9,color:"#8a94a8",letterSpacing:"0.14em",fontWeight:600}}>{l}</div>
+          <div key={l} style={{padding:"10px 20px",borderRight:"1px solid var(--smed-b1)",flexShrink:0}}>
+            <div style={{fontSize:9,color:"var(--smed-sub)",letterSpacing:"0.14em",fontWeight:600}}>{l}</div>
             <div style={{fontSize:18,fontWeight:800,color:c}}>{v}</div>
           </div>
         ))}
         <div style={{flex:1,padding:"10px 18px",display:"flex",flexDirection:"column",justifyContent:"center",minWidth:100}}>
-          <div style={{fontSize:8,color:"#8a94a8",letterSpacing:"0.14em",marginBottom:4,fontWeight:600}}>LOAD BALANCE</div>
-          <div style={{background:"#252A38",borderRadius:3,height:7,overflow:"hidden"}}>
+          <div style={{fontSize:8,color:"var(--smed-sub)",letterSpacing:"0.14em",marginBottom:4,fontWeight:600}}>LOAD BALANCE</div>
+          <div style={{background:"var(--smed-bar)",borderRadius:3,height:7,overflow:"hidden"}}>
             <div style={{width:efficiency+"%",height:"100%",background:`linear-gradient(90deg,#FF6B35,${efficiency>85?"#00D9A3":"#FFD93D"})`,transition:"width 0.4s ease"}}/>
           </div>
         </div>
@@ -2028,20 +2363,20 @@ create policy "public_all_projects" on projects
 
       {/* ── PER-OPERATOR WORK / WAIT CHIPS ── */}
       {operators.length>0&&(
-        <div style={{background:"#0D1018",borderBottom:"1px solid #252A38",padding:"9px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",overflowX:"auto"}}>
-          <span style={{fontSize:9,color:"#8a94a8",letterSpacing:"0.14em",flexShrink:0}}>PER OPERATOR</span>
+        <div style={{background:"var(--smed-card)",borderBottom:"1px solid var(--smed-b1)",padding:"9px 16px",display:"flex",alignItems:"center",gap:10,flexWrap:"wrap",overflowX:"auto"}}>
+          <span style={{fontSize:9,color:"var(--smed-sub)",letterSpacing:"0.14em",flexShrink:0}}>PER OPERATOR</span>
           {operators.map((op,opIdx)=>{
             const workTime = op.tasks.filter(t=>!t.isWait).reduce((s,t)=>s+t.duration,0);
             const waitTime = op.tasks.filter(t=>t.isWait).reduce((s,t)=>s+t.duration,0);
             const opTotal = workTime+waitTime;
             const isBottleneck = opTotal===maxTime && maxTime>1 && op.tasks.length>0;
             return (
-              <div key={op.id} style={{display:"flex",alignItems:"center",gap:8,background:"#1A1F2B",border:`1px solid ${isBottleneck?"#FF6B3566":"#252A38"}`,borderRadius:14,padding:"5px 12px",flexShrink:0}}>
+              <div key={op.id} style={{display:"flex",alignItems:"center",gap:8,background:"var(--smed-card2)",border:`1px solid ${isBottleneck?"#FF6B3566":"var(--smed-b2)"}`,borderRadius:14,padding:"5px 12px",flexShrink:0}}>
                 <span style={{width:8,height:8,borderRadius:"50%",background:OP_COLORS[opIdx%10]}}/>
-                <span style={{fontSize:11,color:"#FFF",fontWeight:600}}>{op.name}</span>
-                <span style={{fontSize:11,color:"#00D9A3",fontWeight:700}}>{workTime}m work</span>
-                <span style={{color:"#3a4150"}}>·</span>
-                <span style={{fontSize:11,color:waitTime>0?"#FF6B35":"#6B7280",fontWeight:700}}>{waitTime}m wait</span>
+                <span style={{fontSize:11,color:"var(--smed-text)",fontWeight:600}}>{op.name}</span>
+                <span style={{fontSize:11,color:"#00D9A3",fontWeight:700}}>{fmtMin(workTime)} work</span>
+                <span style={{color:"var(--smed-b2)"}}>·</span>
+                <span style={{fontSize:11,color:waitTime>0?"#FF6B35":"var(--smed-muted)",fontWeight:700}}>{fmtMin(waitTime)} wait</span>
               </div>
             );
           })}
@@ -2072,21 +2407,21 @@ create policy "public_all_projects" on projects
       )}
 
       {/* ── NOTES BAR ── */}
-      <div style={{background:"#11141D",borderBottom:"1px solid #252A38",padding:"8px 18px",display:"flex",alignItems:"center",gap:8}}>
-        <span style={{fontSize:11,color:"#8a94a8",flexShrink:0}}>📝</span>
+      <div style={{background:"var(--smed-nav)",borderBottom:"1px solid var(--smed-b1)",padding:"8px 18px",display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontSize:11,color:"var(--smed-muted)",flexShrink:0}}>📝</span>
         <input value={activeProject.notes||""} onChange={e=>updateNotes(e.target.value)}
           placeholder="Add notes, shift info, machine number…"
-          style={{...iSty,border:"none",background:"transparent",fontSize:13,padding:"3px 4px",color:"#C0C8D8"}}/>
+          style={{...iSty,border:"none",background:"transparent",fontSize:13,padding:"3px 4px",color:"var(--smed-body)"}}/>
       </div>
 
       {/* ── HINT BAR ── */}
-      <div style={{background:"rgba(255,107,53,0.07)",borderBottom:"1px solid rgba(255,107,53,0.18)",padding:"6px 18px",display:"flex",alignItems:"center",gap:8}}>
+      <div style={{background:"rgba(255,107,53,0.06)",borderBottom:"1px solid rgba(255,107,53,0.15)",padding:"6px 18px",display:"flex",alignItems:"center",gap:8}}>
         <span style={{fontSize:11}}>💡</span>
-        <span style={{fontSize:10,color:"#b89478"}}>Tip: <b style={{color:"#FF6B35"}}>right-click</b> (or <b style={{color:"#FF6B35"}}>long-press</b> on mobile, or tap <b style={{color:"#FF6B35"}}>⋮</b>) any task to insert a wait above or below it. Task height shows its duration.</span>
+        <span style={{fontSize:10,color:"var(--smed-sub)"}}>Tip: <b style={{color:"#FF6B35"}}>right-click</b> (or <b style={{color:"#FF6B35"}}>long-press</b> on mobile, or tap <b style={{color:"#FF6B35"}}>⋮</b>) any task to insert a wait above or below it.</span>
       </div>
 
       {/* ── CONTENT ── */}
-      <div style={{flex:1,overflowY:"auto",padding:"18px 18px",background:"#0B0E15"}}>
+      <div style={{flex:1,overflowY:"auto",padding:"18px 18px",background:"var(--smed-bg2)"}}>
 
         {/* ══ BOARD VIEW ══ */}
         {view==="board"&&(
@@ -2112,17 +2447,17 @@ create policy "public_all_projects" on projects
               const isBottleneck=opTime===maxTime&&maxTime>1&&op.tasks.length>0;
               let taskCursor=0;
               return (
-                <div key={op.id} style={{flex:operators.length<=5?"1 1 0":"0 0 260px",minWidth:240,maxWidth:operators.length<=5?"none":340,display:"flex",flexDirection:"column",background:"#11141D",border:`1px solid ${isBottleneck?"#FF6B3566":"#252A38"}`,borderRadius:12,overflow:"hidden",boxShadow:isBottleneck?"0 0 18px #FF6B3522":"0 2px 8px #00000033",transition:"border-color 0.3s"}}>
+                <div key={op.id} style={{flex:operators.length<=5?"1 1 0":"0 0 260px",minWidth:240,maxWidth:operators.length<=5?"none":340,display:"flex",flexDirection:"column",background:"var(--smed-card)",border:`1px solid ${isBottleneck?"#FF6B3566":"var(--smed-b2)"}`,borderRadius:12,overflow:"hidden",boxShadow:isBottleneck?"0 0 18px #FF6B3522":"0 2px 8px #00000033",transition:"border-color 0.3s"}}>
                   {/* op header */}
                   <div style={{padding:"12px 14px",background:OP_COLORS[opIdx%10]+"22",borderBottom:`1px solid ${OP_COLORS[opIdx%10]}33`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                     <div style={{display:"flex",alignItems:"center",gap:8}}>
                       <div style={{width:9,height:9,borderRadius:"50%",background:OP_COLORS[opIdx%10],flexShrink:0,boxShadow:`0 0 6px ${OP_COLORS[opIdx%10]}`}}/>
                       <input value={op.name} onChange={e=>updateOpName(op.id,e.target.value)}
-                        style={{background:"transparent",border:"none",color:"#FFFFFF",fontFamily:"inherit",fontSize:14,fontWeight:700,letterSpacing:"0.03em",outline:"none",width:130}}/>
+                        style={{background:"transparent",border:"none",color:"var(--smed-text)",fontFamily:"inherit",fontSize:14,fontWeight:700,letterSpacing:"0.03em",outline:"none",width:130}}/>
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:7}}>
                       {isBottleneck&&<span style={{fontSize:8,color:"#FFF",background:"#FF6B35",padding:"2px 6px",borderRadius:3,fontWeight:700,letterSpacing:"0.06em"}}>SLOW</span>}
-                      <span style={{fontSize:15,fontWeight:800,color:OP_COLORS[opIdx%10]}}>{opTime}m</span>
+                      <span style={{fontSize:15,fontWeight:800,color:OP_COLORS[opIdx%10]}}>{fmtMin(opTime)}</span>
                       {operators.length>1&&<button onClick={()=>removeOperator(op.id)} style={{...iconBtnSty,color:"#8a3030",fontSize:12}}>✕</button>}
                     </div>
                   </div>
@@ -2137,7 +2472,7 @@ create policy "public_all_projects" on projects
                   >
                     {op.tasks.map((task,tIdx)=>{
                       const ts=taskCursor; taskCursor+=task.duration;
-                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={15}/>;
+                      return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={15} forceEdit={editingTaskId===task.id} onEditDone={()=>setEditingTaskId(null)}/>;
                     })}
                     <div data-opid={op.id} data-tidx={op.tasks.length}
                       onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
@@ -2169,7 +2504,7 @@ create policy "public_all_projects" on projects
                       </div>
                     ):(
                       <button onClick={()=>setShowAddTask(op.id)}
-                        style={{width:"100%",padding:"8px",background:"#1A1F2B",border:"1px dashed #3A4150",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
+                        style={{width:"100%",padding:"8px",background:"var(--smed-card2)",border:"1px dashed var(--smed-b3)",color:"var(--smed-muted)",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.borderColor="#FF6B35";e.target.style.color="#FF6B35";}}
                         onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
                         + ADD TASK
@@ -2177,7 +2512,7 @@ create policy "public_all_projects" on projects
                     )}
                     <div style={{display:"flex",gap:6}}>
                       <button onClick={()=>setShowTemplPicker(op.id)}
-                        style={{flex:1,padding:"8px",background:"#1A1F2B",border:"1px dashed #3A4150",color:"#8a94a8",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
+                        style={{flex:1,padding:"8px",background:"var(--smed-card2)",border:"1px dashed var(--smed-b3)",color:"var(--smed-muted)",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.borderColor="#4ECDC4";e.target.style.color="#4ECDC4";}}
                         onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
                         ⊞ TEMPLATE
@@ -2226,7 +2561,7 @@ create policy "public_all_projects" on projects
                       <span style={{fontSize:10,fontWeight:700,color:OP_COLORS[opIdx%10],overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{op.name}</span>
                     </div>
                     <div style={{display:"flex",alignItems:"center",gap:4}}>
-                      <span style={{fontSize:11,fontWeight:800,color:isBottleneck?"#FF6B35":OP_COLORS[opIdx%10]}}>{opTime}m</span>
+                      <span style={{fontSize:11,fontWeight:800,color:isBottleneck?"#FF6B35":OP_COLORS[opIdx%10]}}>{fmtMin(opTime)}</span>
                       {isBottleneck&&<span style={{fontSize:7,color:"#FF6B35",background:"#FF6B3514",padding:"1px 4px",borderRadius:2}}>SLOW</span>}
                     </div>
                     {phase==="run"&&(
@@ -2296,7 +2631,7 @@ create policy "public_all_projects" on projects
                           onTouchMove={onTouchMove}
                           onTouchEnd={onTouchEnd}
                           data-opid={op.id}
-                          title={`${task.name} (${task.duration}m)`}
+                          title={`${task.name} (${fmtMin(task.duration)})`}
                           style={{
                             position:"absolute",
                             top:`calc(${topPct}% + 1px)`,
@@ -2319,7 +2654,7 @@ create policy "public_all_projects" on projects
                             opacity:isDraggingThis?0.4:1,
                           }}>
                           <div style={{fontSize:9,color:isWait?"#b0b8c8":(isDone?tc+"88":"#FFF"),fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",lineHeight:1.2,fontStyle:isWait?"italic":"normal"}}>{isWait?"⏸ Waiting":task.name}</div>
-                          <div style={{fontSize:8,color:isWait?"#b0b8c8":(isDone?tc+"66":tc),marginTop:1}}>{task.duration}m</div>
+                          <div style={{fontSize:8,color:isWait?"#b0b8c8":(isDone?tc+"66":tc),marginTop:1}}>{fmtMin(task.duration)}</div>
                           {isActive&&<div style={{position:"absolute",inset:0,background:tc+"22",animation:"pulse 1s infinite"}}/>}
                         </div>
                       );
@@ -2399,7 +2734,7 @@ export default function SMEDApp() {
   if (unlocked) return <SMEDAppInner />;
 
   return (
-    <div style={{minHeight:"100vh",background:"#0B0E15",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono','Courier New',monospace",padding:24}}>
+    <div style={{minHeight:"100vh",background:"var(--smed-bg)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono','Courier New',monospace",padding:24}}>
       <style>{globalCSS}</style>
       <div style={{width:"100%",maxWidth:340,textAlign:"center"}}>
         <div style={{width:48,height:48,background:"linear-gradient(135deg,#FF6B35,#E17055)",borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,fontWeight:900,color:"#FFF",margin:"0 auto 16px",boxShadow:"0 4px 20px #FF6B3555"}}>S</div>
@@ -2434,16 +2769,26 @@ export default function SMEDApp() {
 const globalCSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500;700;800&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin:0; padding:0; }
+  :root {
+    --smed-bg:#080A0F; --smed-bg2:#0B0E15; --smed-nav:#11141D; --smed-card:#0D0F14;
+    --smed-card2:#1A1F2B; --smed-b1:#1E2130; --smed-b2:#252A38; --smed-b3:#2E3445;
+    --smed-text:#FFFFFF; --smed-body:#E2E8F0; --smed-sub:#8a94a8; --smed-muted:#5a6478;
+    --smed-bar:#252A38;
+  }
+  :root.light {
+    --smed-bg:#ECEEF2; --smed-bg2:#E8ECF0; --smed-nav:#E2E5EB; --smed-card:#F4F5F8;
+    --smed-card2:#DDE0E8; --smed-b1:#C8CDD8; --smed-b2:#BFC4CF; --smed-b3:#B8BCC8;
+    --smed-text:#1A1C28; --smed-body:#2E3348; --smed-sub:#5A6070; --smed-muted:#7A8090;
+    --smed-bar:#D0D4DC;
+  }
+  body { background:var(--smed-bg); color:var(--smed-body); -webkit-tap-highlight-color:transparent; transition:background 0.25s, color 0.25s; }
   @keyframes blink  { 0%,100%{opacity:1;} 50%{opacity:0.15;} }
   @keyframes fadeIn { from{opacity:0;transform:translateY(-8px);} to{opacity:1;transform:translateY(0);} }
   @keyframes pulse  { 0%,100%{opacity:0.3;} 50%{opacity:0.7;} }
-  select option { background:#0D0F14; }
+  select option { background:var(--smed-card); }
   ::-webkit-scrollbar { width:4px; height:4px; }
-  ::-webkit-scrollbar-track { background:#080A0F; }
-  ::-webkit-scrollbar-thumb { background:#1E2130; border-radius:2px; }
+  ::-webkit-scrollbar-track { background:var(--smed-bg); }
+  ::-webkit-scrollbar-thumb { background:var(--smed-b1); border-radius:2px; }
   input[type=number]::-webkit-inner-spin-button { opacity:0.3; }
-  body { -webkit-tap-highlight-color: transparent; }
-  @media (max-width: 480px) {
-    .board-col { min-width: 180px !important; max-width: 200px !important; }
-  }
+  @media (max-width:480px) { .board-col { min-width:180px !important; max-width:200px !important; } }
 `;
