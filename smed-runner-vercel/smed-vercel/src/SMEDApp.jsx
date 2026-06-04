@@ -175,7 +175,7 @@ async function sbUpsert(table, rows) {
     const msg = String(e?.message || e);
     if (msg.includes("archived") || msg.includes("PGRST204")) {
       const stripped = rows.map(r => {
-        const { archived, archived_at, ...rest } = r;
+        const { archived, archived_at, target_time, ...rest } = r;
         return rest;
       });
       await post(stripped);
@@ -226,6 +226,7 @@ function projectToRow(p) {
     folder_id: p.folderId || null, task_types: p.taskTypes || [],
     operators: p.operators || [],
     archived: p.archived || false, archived_at: p.archivedAt || null,
+    target_time: p.targetTime || null,
   };
 }
 function rowToProject(r) {
@@ -234,6 +235,7 @@ function rowToProject(r) {
     folderId: r.folder_id || null, taskTypes: r.task_types || [],
     operators: r.operators || [],
     archived: r.archived || false, archivedAt: r.archived_at || null,
+    targetTime: r.target_time || null,
   };
 }
 function folderToRow(f) {
@@ -1095,6 +1097,8 @@ function SMEDAppInner() {
   const saveTimer = useRef(null);
   const [showTemplPicker,setShowTemplPicker] = useState(null);
   const [showExport,setShowExport]           = useState(false);
+  const [editingTarget,setEditingTarget]     = useState(false);
+  const [targetInput,setTargetInput]         = useState("");
   const [importStatus,setImportStatus]       = useState(null); // null | "ok" | "err"
   const [importMsg,setImportMsg]             = useState("");
   const ganttRef  = useRef(null);
@@ -1381,6 +1385,12 @@ function SMEDAppInner() {
   function removeOperator(opId) { if(operators.length>1) mutateOps(ops=>ops.filter(o=>o.id!==opId)); }
   function updateOpName(opId,n) { mutateOps(ops=>ops.map(o=>o.id!==opId?o:{...o,name:n})); }
   function updateNotes(notes)   { mutateProject(activeId,()=>({notes})); }
+  function saveTarget() {
+    const val = parseFloat(targetInput);
+    const t = (!isNaN(val) && val > 0) ? val : null;
+    mutateProject(activeId, ()=>({ targetTime: t }));
+    setEditingTarget(false);
+  }
 
   function addTask(opId) {
     if(!newTask.name.trim()) return;
@@ -1732,18 +1742,24 @@ function SMEDAppInner() {
         doc.line(ML + RULER_W, ry, ML + RULER_W + chartW, ry);
       }
 
-      // Target line (fastest finisher)
-      if (minTime > 0 && minTime < maxTime) {
-        const targetY = chartY + (minTime / maxTime) * rulerH;
-        doc.setDrawColor(0, 217, 163, 0.65);
-        doc.setLineWidth(0.5);
+      // Target line — project target if set, otherwise fastest operator
+      const pdfTarget = (activeProject.targetTime > 0) ? activeProject.targetTime
+                      : (minTime > 0 && minTime < maxTime ? minTime : null);
+      if (pdfTarget) {
+        const targetY = chartY + (pdfTarget / maxTime) * rulerH;
+        // Golden for project target, teal for auto-fastest
+        const isMannual = activeProject.targetTime > 0;
+        if (isMannual) doc.setDrawColor(255, 217, 61, 0.85); // #FFD93D
+        else           doc.setDrawColor(0, 217, 163, 0.65);  // teal fallback
+        doc.setLineWidth(0.6);
         doc.setLineDashPattern([2.5, 1.5], 0);
         doc.line(ML + RULER_W, targetY, ML + RULER_W + chartW, targetY);
         doc.setLineDashPattern([], 0);
-        doc.setFont("helvetica","italic");
+        doc.setFont("helvetica", isMannual ? "bold" : "italic");
         doc.setFontSize(6);
-        doc.setTextColor(0, 217, 163);
-        doc.text(`target ${fmtMin(minTime)}`, ML, targetY - 0.5);
+        if (isMannual) doc.setTextColor(255, 217, 61);
+        else           doc.setTextColor(0, 217, 163);
+        doc.text(isMannual ? `◎ TARGET ${fmtMin(pdfTarget)}` : `target ${fmtMin(pdfTarget)}`, ML, targetY - 0.8);
       }
 
       // ── Footer legend ─────────────────────────────────────────────────────
@@ -1759,7 +1775,6 @@ function SMEDAppInner() {
       ];
       legendItems.forEach(({ label, color, wait }) => {
         const [lr, lg, lb] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
-        // Swatch: dark grey fill + coloured border
         doc.setFillColor(24, 28, 40);
         doc.setDrawColor(lr, lg, lb);
         doc.setLineWidth(0.5);
@@ -1772,6 +1787,20 @@ function SMEDAppInner() {
         doc.text(label, lx + 9, footerY + 3.2);
         lx += 9 + doc.getTextWidth(label) + 6;
       });
+
+      // Target legend entry
+      if (pdfTarget) {
+        doc.setDrawColor(255, 217, 61, 0.85);
+        doc.setLineWidth(0.6);
+        doc.setLineDashPattern([2, 1.5], 0);
+        doc.line(lx, footerY + 2.2, lx + 7, footerY + 2.2);
+        doc.setLineDashPattern([], 0);
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(6.5);
+        doc.setTextColor(190, 196, 210);
+        const tgtLegend = activeProject.targetTime > 0 ? `Target (${fmtMin(pdfTarget)})` : `Fastest operator (${fmtMin(pdfTarget)})`;
+        doc.text(tgtLegend, lx + 9, footerY + 3.2);
+      }
 
       // Branding
       doc.setFont("helvetica","italic");
@@ -1792,42 +1821,54 @@ function SMEDAppInner() {
     try {
       const XLSX = await ensureXLSX();
       const wb = XLSX.utils.book_new();
+      const typeOptions = taskTypes.map(t=>t.name).join(", ");
+      const typeList    = taskTypes.map(t=>t.name).join(","); // comma-separated for dropdown formula
 
-      // one sheet per operator
-      operators.forEach((op, i) => {
-        const typeOptions = taskTypes.map(t=>t.name).join(", ");
+      const BLANK_ROWS = 25;
+      const DATA_START  = 6;   // data begins at row 6 (1-indexed)
+      const DATA_END    = DATA_START + BLANK_ROWS - 1;
+
+      function makeSheet(opName) {
         const rows = [
-          ["SMED RUNNER — TASK IMPORT TEMPLATE"],
-          ["Operator:", op.name],
-          ["Project:", activeProject.name],
-          [""],
-          ["Task Name", "Task Time (min)", "Task Type", "Task Time (sec)"],   // header
-          [`Task Types: ${typeOptions}  |  Use EITHER minutes (col B) OR seconds (col D) — leave the other blank`, "", "", ""],  // instruction
-          ...op.tasks.map(t => [
-            t.isWait ? "WAITING" : t.name,
-            t.isWait ? "" : (t.duration >= 1 ? t.duration : ""),    // minutes — blank for sub-minute tasks
-            t.isWait ? "WAIT" : t.type,
-            t.duration < 1 ? Math.round(t.duration * 60) : "",      // seconds — filled for sub-minute tasks
-          ]),
-          ...Array(10).fill(["", "", "", ""]),
+          // Row 1: brand
+          ["SMED RUNNER — TASK IMPORT TEMPLATE", "", "", ""],
+          // Row 2: operator
+          ["Operator:", opName, "", ""],
+          // Row 3: project
+          ["Project:", activeProject.name, "", ""],
+          // Row 4: instructions (moved before headers)
+          [`Task Types: ${typeOptions}  |  Use EITHER col B (minutes) OR col C (seconds) — leave the other blank. Select task type from dropdown in col D.`, "", "", ""],
+          // Row 5: column headers — C and D swapped
+          ["Task Name", "Task Time (min)", "Task Time (sec)", "Task Type"],
+          // Rows 6+: blank data rows
+          ...Array(BLANK_ROWS).fill(["", "", "", ""]),
         ];
+
         const ws = XLSX.utils.aoa_to_sheet(rows);
-        ws["!cols"] = [{ wch: 50 }, { wch: 16 }, { wch: 18 }, { wch: 16 }];
+
+        // Column widths: A wide, B/C medium, D medium
+        ws["!cols"] = [{ wch: 52 }, { wch: 16 }, { wch: 16 }, { wch: 18 }];
+
+        // Dropdown validation on column D for every data row
+        ws["!dataValidations"] = [{
+          type: "list",
+          sqref: `D${DATA_START}:D${DATA_END}`,
+          formula1: `"${typeList}"`,
+          showDropDown: false,       // false = show the dropdown arrow
+          showErrorMessage: false,   // allow freehand entry too (don't block)
+        }];
+
+        return ws;
+      }
+
+      // One sheet per operator
+      operators.forEach(op => {
+        const ws = makeSheet(op.name);
         XLSX.utils.book_append_sheet(wb, ws, op.name.slice(0, 31));
       });
 
-      const typeOptions = taskTypes.map(t=>t.name).join(", ");
-      const blankRows = [
-        ["SMED RUNNER — TASK IMPORT TEMPLATE"],
-        ["Operator:", "Enter Operator Name Here"],
-        ["Project:", activeProject.name],
-        [""],
-        ["Task Name", "Task Time (min)", "Task Type", "Task Time (sec)"],
-        [`Task Types: ${typeOptions}  |  Use EITHER minutes (col B) OR seconds (col D) — leave the other blank`, "", "", ""],
-        ...Array(15).fill(["", "", "", ""]),
-      ];
-      const blankWs = XLSX.utils.aoa_to_sheet(blankRows);
-      blankWs["!cols"] = [{ wch: 50 }, { wch: 16 }, { wch: 18 }, { wch: 16 }];
+      // Blank "New Operator" sheet
+      const blankWs = makeSheet("Enter Operator Name Here");
       XLSX.utils.book_append_sheet(wb, blankWs, "New Operator");
 
       XLSX.writeFile(wb, `${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_tasks_template.xlsx`);
@@ -1904,9 +1945,9 @@ function SMEDAppInner() {
         for (let i = dataStart; i < rows.length; i++) {
           const row = rows[i];
           const name    = String(row[0] || "").trim();
-          const durMin  = Number(row[1]);    // column B: minutes
-          const typeRaw = String(row[2] || "").trim();
-          const durSec  = Number(row[3]);    // column D: seconds (optional)
+          const durMin  = Number(row[1]);               // col B: minutes
+          const durSec  = Number(row[2]);               // col C: seconds (swapped from D)
+          const typeRaw = String(row[3] || "").trim();  // col D: task type (swapped from C)
 
           // Skip: empty name
           if (!name) continue;
@@ -2368,6 +2409,28 @@ create policy "public_all_projects" on projects
             <div style={{fontSize:18,fontWeight:800,color:c}}>{v}</div>
           </div>
         ))}
+        {/* Editable target time */}
+        <div style={{padding:"10px 20px",borderRight:"1px solid var(--smed-b1)",flexShrink:0,cursor:"pointer",minWidth:96}}
+          onClick={()=>{ if(!editingTarget){setTargetInput(activeProject.targetTime?.toString()||""); setEditingTarget(true);} }}>
+          <div style={{fontSize:9,color:"var(--smed-sub)",letterSpacing:"0.14em",fontWeight:600,display:"flex",alignItems:"center",gap:4}}>
+            TARGET <span style={{fontSize:8,opacity:0.5}}>✎</span>
+          </div>
+          {editingTarget ? (
+            <div style={{display:"flex",alignItems:"center",gap:4}}>
+              <input autoFocus type="number" min={1} max={480} value={targetInput}
+                onChange={e=>setTargetInput(e.target.value)}
+                onBlur={saveTarget}
+                onKeyDown={e=>{ if(e.key==="Enter") saveTarget(); if(e.key==="Escape"){setEditingTarget(false);} }}
+                onClick={e=>e.stopPropagation()}
+                style={{...iSty,width:56,fontSize:14,fontWeight:800,padding:"2px 6px",color:"#FFD93D"}}/>
+              <span style={{fontSize:10,color:"var(--smed-sub)"}}>m</span>
+            </div>
+          ) : (
+            <div style={{fontSize:18,fontWeight:800,color:"#FFD93D"}}>
+              {activeProject.targetTime ? fmtMin(activeProject.targetTime) : <span style={{fontSize:11,color:"var(--smed-b3)",fontWeight:600}}>SET →</span>}
+            </div>
+          )}
+        </div>
         <div style={{flex:1,padding:"10px 18px",display:"flex",flexDirection:"column",justifyContent:"center",minWidth:100}}>
           <div style={{fontSize:8,color:"var(--smed-sub)",letterSpacing:"0.14em",marginBottom:4,fontWeight:600}}>LOAD BALANCE</div>
           <div style={{background:"var(--smed-bar)",borderRadius:3,height:7,overflow:"hidden"}}>
@@ -2443,9 +2506,10 @@ create policy "public_all_projects" on projects
           <div style={{display:"flex",gap:14,overflowX:"auto",paddingBottom:12,alignItems:"flex-start",minHeight:"calc(100vh - 240px)"}}>
             {/* Shared time axis */}
             {(() => {
-              const px=15, axisTop=78; // header height offset to align with task area
+              const px=15, axisTop=78;
               const marks=[]; for(let m=0;m<=maxTime;m+=Math.max(1, maxTime<=15?1:maxTime<=40?5:10)) marks.push(m);
               if(marks[marks.length-1]!==maxTime) marks.push(maxTime);
+              const tgt = activeProject.targetTime;
               return (
                 <div style={{flexShrink:0,width:38,position:"relative",paddingTop:axisTop}}>
                   {marks.map(m=>(
@@ -2453,6 +2517,13 @@ create policy "public_all_projects" on projects
                       <span style={{fontSize:9,color:m===maxTime?"#FF6B35":"#5a6478",fontWeight:m===maxTime?700:400}}>{m}m</span>
                     </div>
                   ))}
+                  {/* Target time marker on axis */}
+                  {tgt > 0 && (
+                    <div style={{position:"absolute",top:axisTop+tgt*px,right:0,transform:"translateY(-50%)",zIndex:20,display:"flex",alignItems:"center",gap:3}}>
+                      <span style={{fontSize:8,color:"#FFD93D",fontWeight:700,whiteSpace:"nowrap"}}>{fmtMin(tgt)}</span>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:"#FFD93D",flexShrink:0}}/>
+                    </div>
+                  )}
                   <div style={{position:"absolute",top:axisTop,bottom:0,right:0,width:1,background:"#252A38"}}/>
                 </div>
               );
@@ -2479,12 +2550,23 @@ create policy "public_all_projects" on projects
                   {phase==="run"&&<div style={{background:"#1A1D26",height:2}}><div style={{width:Math.min((runMinutes/(opTime||1))*100,100)+"%",height:"100%",background:OP_COLORS[opIdx%10],transition:"width 0.08s linear"}}/></div>}
 
                   {/* tasks */}
-                  <div style={{padding:"10px",minHeight:120}} data-opid={op.id}
+                  <div style={{padding:"10px",minHeight:120,position:"relative"}} data-opid={op.id}
                     onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
                     onDrop={e=>onDrop(e,op.id,op.tasks.length)}
                     onTouchMove={onTouchMove}
                     onTouchEnd={onTouchEnd}
                   >
+                    {/* Target time line — dashed yellow across column */}
+                    {activeProject.targetTime > 0 && (
+                      <div style={{position:"absolute",top:10+activeProject.targetTime*15,left:0,right:0,zIndex:10,pointerEvents:"none"}}>
+                        <div style={{borderTop:"2px dashed #FFD93D",opacity:0.75}}/>
+                        {opIdx===0&&(
+                          <span style={{position:"absolute",right:2,top:-14,fontSize:8,color:"#FFD93D",fontWeight:700,background:"var(--smed-card)",padding:"1px 5px",borderRadius:3,whiteSpace:"nowrap",border:"1px solid #FFD93D44"}}>
+                            ◎ TARGET {fmtMin(activeProject.targetTime)}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {op.tasks.map((task,tIdx)=>{
                       const ts=taskCursor; taskCursor+=task.duration;
                       return <TaskCard key={task.id} task={task} opId={op.id} tIdx={tIdx} taskTypes={taskTypes} phase={phase} runMinutes={runMinutes} taskStart={ts} dragging={dragging} dragOver={dragOver} onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop} onDragEnd={onDragEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onDelete={()=>deleteTask(op.id,task.id)} onUpdate={(f,v)=>updateTask(op.id,task.id,f,v)} onContextMenu={(oId,tId,idx,x,y)=>setCtxMenu({opId:oId,taskId:tId,index:idx,x,y})} scaleMin={15} forceEdit={editingTaskId===task.id} onEditDone={()=>setEditingTaskId(null)}/>;
