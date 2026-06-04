@@ -156,12 +156,34 @@ async function sbGet(table) {
   return r.json();
 }
 async function sbUpsert(table, rows) {
-  const r = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}`, {
-    method: "POST",
-    headers: { ...SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify(rows),
-  });
-  if (!r.ok) throw new Error(`${table} upsert failed: ${r.status}`);
+  const post = async (body) => {
+    const r = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { ...SB_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const msg = await r.text().catch(()=>"");
+      throw new Error(`${table} upsert failed ${r.status}: ${msg}`);
+    }
+  };
+  try {
+    await post(rows);
+  } catch(e) {
+    // If it failed because the archived/archived_at columns don't exist yet,
+    // strip those fields and retry so ALL other saves still work correctly.
+    const msg = String(e?.message || e);
+    if (msg.includes("archived") || msg.includes("PGRST204")) {
+      const stripped = rows.map(r => {
+        const { archived, archived_at, ...rest } = r;
+        return rest;
+      });
+      await post(stripped);
+      // schema fallback used — archived state stored in local cache only
+    } else {
+      throw e;
+    }
+  }
 }
 async function sbDelete(table, id) {
   const r = await fetchWithTimeout(`${SB_URL}/rest/v1/${table}?id=eq.${id}`, {
@@ -440,7 +462,7 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
   }
   function clearLP(){ clearTimeout(lpTimer.current); }
 
-  const nameColor = isWait?"#b0b8c8":(isDone?"#6a7a6a":"#F0F4FA");
+  const nameColor = isWait?"var(--smed-sub)":(isDone?"var(--smed-muted)":"var(--smed-text)");
   const displayName = isWait ? "Waiting / Downtime" : task.name;
 
   return (
@@ -461,9 +483,9 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
         title={`${displayName} — ${fmtMin(task.duration)}`}
         style={{
           background:isWait
-            ? `repeating-linear-gradient(45deg, #20242E, #20242E 6px, #181C24 6px, #181C24 12px)`
-            : (isDone?"#0d1f0d":isActive?tc+"22":isDraggingThis?"#1f2535":"#1A1F2B"),
-          border:`1px ${isWait?"dashed":"solid"} ${isActive?tc:isDone?"#2a4a2a":isDraggingThis?"#4ECDC4":isWait?"#4a5160":"#2E3445"}`,
+            ? `repeating-linear-gradient(45deg, var(--smed-wait-a), var(--smed-wait-a) 6px, var(--smed-wait-b) 6px, var(--smed-wait-b) 12px)`
+            : (isDone?"var(--smed-card)":isActive?tc+"22":isDraggingThis?"var(--smed-b2)":"var(--smed-card2)"),
+          border:`1px ${isWait?"dashed":"solid"} ${isActive?tc:isDone?"var(--smed-b2)":isDraggingThis?"#4ECDC4":isWait?"var(--smed-b2)":"var(--smed-b3)"}`,
           borderRadius:5,
           padding: editing ? "10px 12px" : (isCompact ? "0 8px" : "6px 10px"),
           marginBottom:1,                       // hairline; height stays ∝ time
@@ -479,7 +501,7 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
             <div style={{display:"flex",gap:6}}>
               <input type="number" value={task.duration} min={0.01} max={240}
                 onChange={e=>onUpdate("duration",Number(e.target.value))}
-                style={{...iSty,width:68,fontSize:13,padding:"7px",color:"#FFD93D"}} autoFocus={isWait}/>
+                style={{...iSty,width:68,fontSize:13,padding:"7px",color:"var(--smed-dur)"}} autoFocus={isWait}/>
               {!isWait&&<select value={task.type} onChange={e=>onUpdate("type",e.target.value)}
                 style={{...iSty,flex:1,fontSize:12,padding:"7px",color:tc}}>
                 {taskTypes.map(t=><option key={t.name} value={t.name}>{t.name}</option>)}
@@ -507,11 +529,11 @@ function TaskCard({task,opId,taskTypes,onDragStart,onDragOver,onDrop,onDragEnd,o
               {/* Spacer */}
               <span style={{flex:1}}/>
               {/* Duration — always top-right */}
-              <span style={{fontSize:12,fontWeight:800,color:isWait?WAIT_COLOR:"#FFD93D",flexShrink:0,letterSpacing:"0.02em"}}>{fmtMin(task.duration)}</span>
+              <span style={{fontSize:12,fontWeight:800,color:isWait?WAIT_COLOR:"var(--smed-dur)",flexShrink:0,letterSpacing:"0.02em"}}>{fmtMin(task.duration)}</span>
               {/* ⋮ menu — right of duration */}
               <button
                 onClick={e=>{e.stopPropagation();onContextMenu(opId,task.id,tIdx,e.clientX,e.clientY);}}
-                style={{...iconBtnSty,fontSize:16,color:"#6a7480",padding:"0 1px",flexShrink:0,lineHeight:1}}
+                style={{...iconBtnSty,fontSize:16,color:"var(--smed-sub)",padding:"0 1px",flexShrink:0,lineHeight:1}}
                 title="Right-click or tap to edit / add wait / delete">⋮</button>
             </div>
             {/* Task name — shown only when there's vertical room */}
@@ -1115,10 +1137,16 @@ function SMEDAppInner() {
       // 2. Try to load live data from Supabase
       try {
         const data = await loadFromSupabase();
-        setProjects(data.projects);
+        // Merge: server is authoritative but preserve local archived state
+        // in case DB schema hasn't been updated yet
+        const merged = data.projects.map(sp => {
+          const lp = cache?.projects?.find(p => p.id === sp.id);
+          return lp ? { ...sp, archived: lp.archived || sp.archived || false, archivedAt: lp.archivedAt || sp.archivedAt || null } : sp;
+        });
+        setProjects(merged);
         setFolders(data.folders || []);
-        if (!cache?.activeId) setActiveId(data.projects[0]?.id || null);
-        saveCache({ projects: data.projects, folders: data.folders, activeId: cache?.activeId || data.projects[0]?.id || null });
+        if (!cache?.activeId) setActiveId(merged[0]?.id || null);
+        saveCache({ projects: merged, folders: data.folders, activeId: cache?.activeId || merged[0]?.id || null });
         setDbError(null);
         setDbReady(true);
       } catch(e) {
@@ -1138,17 +1166,39 @@ function SMEDAppInner() {
     return () => clearTimeout(failsafe);
   }, []);
 
-  // ── real-time polling: refresh from Supabase every 30s ──────────────────────
+  // ── real-time polling: refresh from Supabase every 60s ──────────────────────
+  // Uses a MERGE strategy: server data is authoritative except for fields that
+  // the DB may not have yet (archived) and projects modified very recently locally.
+  const lastMutatedRef = useRef({}); // projectId → timestamp of last local change
+
+  function mergeServerProjects(serverProjects, localProjects) {
+    const now = Date.now();
+    return serverProjects.map(sp => {
+      const lp = localProjects.find(p => p.id === sp.id);
+      if (!lp) return sp;
+      // If this project was locally changed in the last 10s, keep the local version
+      // (covers the window between a save and the next poll confirming it)
+      const msSinceMutation = now - (lastMutatedRef.current[sp.id] || 0);
+      if (msSinceMutation < 10000) return lp;
+      // Otherwise take server version but preserve local-only fields
+      // (archived state lives locally if DB column doesn't exist yet)
+      return { ...sp, archived: lp.archived || sp.archived || false, archivedAt: lp.archivedAt || sp.archivedAt || null };
+    });
+  }
+
   useEffect(() => {
     if (!loaded || !dbReady) return;
     const poll = setInterval(async () => {
       try {
         const data = await loadFromSupabase();
-        setProjects(data.projects);
+        setProjects(local => {
+          const merged = mergeServerProjects(data.projects, local);
+          saveCache({ projects: merged, folders: data.folders || [], activeId });
+          return merged;
+        });
         setFolders(data.folders || []);
-        saveCache({ projects: data.projects, folders: data.folders || [], activeId });
       } catch {}
-    }, 30000);
+    }, 60000);
     return () => clearInterval(poll);
   }, [loaded, dbReady]);
 
@@ -1159,9 +1209,12 @@ function SMEDAppInner() {
     setSyncing(true);
     try {
       const data = await loadFromSupabase();
-      setProjects(data.projects);
+      setProjects(local => {
+        const merged = mergeServerProjects(data.projects, local);
+        saveCache({ projects: merged, folders: data.folders || [], activeId });
+        return merged;
+      });
       setFolders(data.folders || []);
-      saveCache({ projects: data.projects, folders: data.folders || [], activeId });
       setDbError(null);
     } catch(e) {
       setDbError("Could not connect to database.");
@@ -1178,6 +1231,8 @@ function SMEDAppInner() {
       setDemoProject(p => ({...p, ...fn(p)}));
       return;
     }
+    // Stamp so polling won't overwrite this project for the next 10s
+    lastMutatedRef.current = { ...lastMutatedRef.current, [id]: Date.now() };
     setProjects(ps => {
       const next = ps.map(p => p.id===id ? {...p,...fn(p)} : p);
       const updated = next.find(p=>p.id===id);
@@ -1271,6 +1326,7 @@ function SMEDAppInner() {
 
   // ── archive / restore / permanent delete ─────────────────────────────────────
   function archiveProject(id) {
+    lastMutatedRef.current = { ...lastMutatedRef.current, [id]: Date.now() };
     setProjects(ps => {
       const next = ps.map(p => p.id!==id ? p : {...p, archived:true, archivedAt:Date.now()});
       const updated = next.find(p=>p.id===id);
@@ -1281,6 +1337,7 @@ function SMEDAppInner() {
     if(activeId===id){ setActiveId(null); setScreen("home"); }
   }
   function restoreProject(id) {
+    lastMutatedRef.current = { ...lastMutatedRef.current, [id]: Date.now() };
     setProjects(ps => {
       const next = ps.map(p => p.id!==id ? p : {...p, archived:false, archivedAt:null});
       const updated = next.find(p=>p.id===id);
@@ -1515,262 +1572,220 @@ function SMEDAppInner() {
   async function exportGanttPDF() {
     try {
       const JsPDF = await ensureJsPDF();
-
-      // ── A3 Portrait: 297 × 420mm ──────────────────────────────────────────────
       const doc = new JsPDF({ orientation:"portrait", unit:"mm", format:"a3", compress:true });
 
       const PAGE_W = 297, PAGE_H = 420;
+      const ML = 14, MR = 12, MT = 12, MB = 14;
+      const RULER_W = 18;    // time ruler column width
+      const HDR_H   = 15;    // operator column header height
+      const FOOT_H  = 13;    // footer height
+      const GAP     = 0.8;   // gap between blocks (mm)
 
-      // Layout constants
-      const MARGIN_L = 14, MARGIN_R = 12, MARGIN_T = 10, MARGIN_B = 14;
-      const TITLE_H  = 30;   // title + subtitle block
-      const FOOTER_H = 18;   // legend + stats row
-      const HEADER_H = 14;   // operator column headers
-      const TIME_COL = 18;   // width of left-hand time ruler column
+      const chartX  = ML + RULER_W;
+      const chartY  = MT + HDR_H;
+      const chartW  = PAGE_W - ML - MR - RULER_W;
+      const colW    = chartW / operators.length;
 
-      const chartX    = MARGIN_L + TIME_COL;
-      const chartY    = MARGIN_T + TITLE_H + HEADER_H;
-      const chartW    = PAGE_W - MARGIN_L - MARGIN_R - TIME_COL;
-      const chartH    = PAGE_H - MARGIN_T - TITLE_H - HEADER_H - FOOTER_H - MARGIN_B;
-      const totalMin  = maxTime + 1;          // +1 so last block isn't clipped
-      const ppm       = chartH / totalMin;    // pixels (mm) per minute — A3 gives ~5.5mm/min for 60min
-      const colW      = chartW / operators.length;
+      // ── Text layout constants ──────────────────────────────────────────────
+      const NF   = 7;    // name font size (pt)
+      const DF   = 6.5;  // duration font size (pt)
+      const LH   = 3.0;  // line height (mm) at NF pt
+      const DLH  = 2.8;  // duration line height (mm)
+      const PH   = 1.5;  // horizontal padding inside block (mm)
+      const PVT  = 1.4;  // vertical padding top (mm)
+      const PVB  = 1.2;  // vertical padding bottom (mm)
+      const textMaxW = colW - PH * 2 - 2.5; // max text width inside block
 
-      // ── Background ────────────────────────────────────────────────────────────
+      // ── Pre-calculate block heights from text content ─────────────────────
+      const blockData = operators.map(op => {
+        const blocks = op.tasks.map(task => {
+          const isWait = task.isWait;
+          const rawName = isWait ? "Waiting / Downtime" : task.name;
+          doc.setFontSize(NF);
+          const nameLines = doc.splitTextToSize(rawName, textMaxW);
+          const blockH = Math.max(
+            PVT + nameLines.length * LH + DLH + PVB,
+            6  // absolute minimum so 1-char tasks are still clickable
+          );
+          return { task, isWait, nameLines, blockH };
+        });
+        const totalH = blocks.reduce((s, b) => s + b.blockH + GAP, 0);
+        return { op, blocks, totalH };
+      });
+
+      const maxColH = Math.max(...blockData.map(c => c.totalH), 10);
+
+      // ── Background ────────────────────────────────────────────────────────
       doc.setFillColor(8, 10, 15);
       doc.rect(0, 0, PAGE_W, PAGE_H, "F");
 
-      // ── Title block ───────────────────────────────────────────────────────────
-      // SMED Runner brand line
-      doc.setFont("helvetica","bold");
-      doc.setFontSize(9);
-      doc.setTextColor(255, 107, 53);
-      doc.text("SMED RUNNER", MARGIN_L + TIME_COL, MARGIN_T + 6);
-
-      // Project name (large)
-      doc.setFontSize(16);
-      doc.setTextColor(255, 255, 255);
-      const projectLabel = activeProject.name.length > 48 ? activeProject.name.slice(0, 47) + "…" : activeProject.name;
-      doc.text(projectLabel, MARGIN_L + TIME_COL, MARGIN_T + 16);
-
-      // Date + stats line
-      doc.setFont("helvetica","normal");
-      doc.setFontSize(8);
-      doc.setTextColor(138, 148, 168);
-      const dateStr  = new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
-      const statsStr = `Operators: ${operators.length}   Max time: ${fmtMin(maxTime)}   Efficiency: ${efficiency}%`;
-      doc.text(dateStr, MARGIN_L + TIME_COL, MARGIN_T + 23);
-      doc.text(statsStr, PAGE_W - MARGIN_R - doc.getTextWidth(statsStr), MARGIN_T + 23);
-
-      // Divider under title
-      doc.setDrawColor(37, 42, 56);
-      doc.setLineWidth(0.3);
-      doc.line(MARGIN_L, MARGIN_T + TITLE_H - 2, PAGE_W - MARGIN_R, MARGIN_T + TITLE_H - 2);
-
-      // ── Time ruler (left column) ──────────────────────────────────────────────
-      const tickInterval = totalMin <= 15 ? 1 : totalMin <= 40 ? 5 : totalMin <= 80 ? 10 : 15;
-      doc.setFont("helvetica","normal");
-      for (let t = 0; t <= totalMin; t += tickInterval) {
-        const y = chartY + (t / totalMin) * chartH;
-        // label
-        doc.setFontSize(7);
-        doc.setTextColor(90, 96, 112);
-        const lbl = fmtMin(t);
-        doc.text(lbl, MARGIN_L + TIME_COL - 3 - doc.getTextWidth(lbl), y + 1);
-        // gridline across full chart
-        doc.setDrawColor(30, 33, 48);
-        doc.setLineWidth(t % (tickInterval * 2) === 0 ? 0.3 : 0.15);
-        doc.line(chartX, y, chartX + chartW, y);
-      }
-
-      // ── Operator column headers ────────────────────────────────────────────────
-      const headerY = MARGIN_T + TITLE_H;
+      // ── Operator column headers ───────────────────────────────────────────
       operators.forEach((op, opIdx) => {
         const x = chartX + opIdx * colW;
         const opColor = OP_COLORS[opIdx % 10];
-        const r = parseInt(opColor.slice(1,3),16);
-        const g = parseInt(opColor.slice(3,5),16);
-        const b = parseInt(opColor.slice(5,7),16);
+        const [r, g, b] = [parseInt(opColor.slice(1,3),16), parseInt(opColor.slice(3,5),16), parseInt(opColor.slice(5,7),16)];
         const opTotalMin = op.tasks.reduce((s,t) => s + t.duration, 0);
         const isBottleneckOp = opTotalMin === maxTime && maxTime > 1 && op.tasks.length > 0;
-
-        // header bg
-        doc.setFillColor(r, g, b, 0.18);
-        doc.rect(x, headerY, colW, HEADER_H, "F");
-
-        // bottleneck badge background
-        if (isBottleneckOp) {
-          doc.setFillColor(255, 107, 53, 0.3);
-          doc.rect(x, headerY, colW, HEADER_H, "F");
-        }
-
-        // operator name
-        doc.setFont("helvetica","bold");
-        doc.setFontSize(8);
-        doc.setTextColor(r, g, b);
-        const nameLimit = Math.floor((colW - 16) / 1.9);
-        const opLabel = op.name.length > nameLimit ? op.name.slice(0, nameLimit - 1) + "…" : op.name;
-        doc.text(opLabel, x + 2.5, headerY + 6);
-
-        // time + bottleneck tag
-        doc.setFontSize(7.5);
-        const timeLabel = fmtMin(opTotalMin);
-        doc.text(timeLabel, x + colW - 2.5 - doc.getTextWidth(timeLabel), headerY + 6);
-
-        // work vs wait breakdown (small line under name)
         const workT = op.tasks.filter(t=>!t.isWait).reduce((s,t)=>s+t.duration,0);
         const waitT = op.tasks.filter(t=>t.isWait).reduce((s,t)=>s+t.duration,0);
-        doc.setFont("helvetica","normal");
-        doc.setFontSize(6);
-        doc.setTextColor(138, 148, 168);
-        const breakdown = waitT > 0 ? `${fmtMin(workT)} work · ${fmtMin(waitT)} wait` : `${fmtMin(workT)} work`;
-        doc.text(breakdown, x + 2.5, headerY + 11);
 
+        // Header bg
+        doc.setFillColor(r, g, b, isBottleneckOp ? 0.22 : 0.13);
+        doc.rect(x, MT, colW, HDR_H, "F");
+        // Bottom border
+        doc.setDrawColor(r, g, b, 0.3);
+        doc.setLineWidth(0.3);
+        doc.line(x, MT + HDR_H, x + colW, MT + HDR_H);
+
+        // Operator name
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(8.5);
+        doc.setTextColor(r, g, b);
+        const nameClip = op.name.length > 20 ? op.name.slice(0, 19) + "…" : op.name;
+        doc.text(nameClip, x + 2, MT + 6);
+
+        // Time + SLOW badge
+        doc.setFontSize(8);
+        const timeLabel = fmtMin(opTotalMin);
+        doc.text(timeLabel, x + colW - 2 - doc.getTextWidth(timeLabel), MT + 6);
         if (isBottleneckOp) {
           doc.setFont("helvetica","bold");
           doc.setFontSize(5.5);
-          doc.setTextColor(255, 107, 53);
-          doc.text("▼ SLOWEST", x + colW - 2.5 - doc.getTextWidth("▼ SLOWEST"), headerY + 11);
+          doc.setFillColor(255, 107, 53);
+          doc.roundedRect(x + colW - 2 - doc.getTextWidth("SLOW") - 3, MT + 7.5, doc.getTextWidth("SLOW") + 3, 3.5, 0.5, 0.5, "F");
+          doc.setTextColor(255,255,255);
+          doc.text("SLOW", x + colW - 2 - doc.getTextWidth("SLOW") - 1.3, MT + 10.5);
         }
+
+        // Work / wait breakdown
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(6);
+        doc.setTextColor(138, 148, 168);
+        const breakdown = waitT > 0 ? `${fmtMin(workT)} work · ${fmtMin(waitT)} wait` : `${fmtMin(workT)} work`;
+        doc.text(breakdown, x + 2, MT + 12.5);
+
+        // Column left separator
+        doc.setDrawColor(30, 33, 48);
+        doc.setLineWidth(0.2);
+        doc.line(x, MT, x, MT + HDR_H);
       });
 
-      // ── Target / fastest finish dashed line ─────────────────────────────────
-      if (minTime > 0 && minTime < maxTime) {
-        const targetY = chartY + (minTime / totalMin) * chartH;
-        doc.setDrawColor(0, 217, 163, 0.7);
-        doc.setLineWidth(0.5);
-        doc.setLineDashPattern([3, 2], 0);
-        doc.line(chartX, targetY, chartX + chartW, targetY);
-        doc.setLineDashPattern([], 0);
+      // ── Task blocks ───────────────────────────────────────────────────────
+      blockData.forEach(({ op, blocks }, opIdx) => {
+        const x = chartX + opIdx * colW;
+        let y = chartY;
+
+        blocks.forEach(({ task, isWait, nameLines, blockH }) => {
+          const ttColor = isWait ? WAIT_COLOR : (taskTypes.find(t => t.name === task.type) || { color:"#888888" }).color;
+          const [r2,g2,b2] = [parseInt(ttColor.slice(1,3),16), parseInt(ttColor.slice(3,5),16), parseInt(ttColor.slice(5,7),16)];
+
+          // Dark grey fill
+          doc.setFillColor(24, 28, 40);
+
+          // Full coloured outline
+          doc.setDrawColor(r2, g2, b2);
+          doc.setLineWidth(0.55);
+          if (isWait) doc.setLineDashPattern([1.8, 1.2], 0);
+          doc.roundedRect(x + 1, y + 0.3, colW - 2, blockH - 0.4, 0.8, 0.8, "FD");
+          if (isWait) doc.setLineDashPattern([], 0);
+
+          // Task name — all lines, no clipping
+          doc.setFont("helvetica", isWait ? "italic" : "normal");
+          doc.setFontSize(NF);
+          doc.setTextColor(isWait ? 154 : 230, isWait ? 164 : 236, isWait ? 184 : 244);
+          nameLines.forEach((line, i) => {
+            doc.text(line, x + 1 + PH, y + PVT + LH * 0.75 + i * LH);
+          });
+
+          // Duration — coloured, below name
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(DF);
+          doc.setTextColor(r2, g2, b2);
+          const durLabel = fmtMin(task.duration);
+          doc.text(durLabel, x + 1 + PH, y + PVT + nameLines.length * LH + DLH * 0.7);
+
+          y += blockH + GAP;
+        });
+
+        // Column right separator
+        doc.setDrawColor(20, 24, 35);
+        doc.setLineWidth(0.2);
+        doc.line(x + colW, chartY, x + colW, chartY + maxColH);
+      });
+
+      // ── Time ruler (approximate — left of chart) ──────────────────────────
+      const rulerH = maxColH;
+      doc.setDrawColor(30, 33, 48);
+      doc.setLineWidth(0.2);
+      doc.line(ML + RULER_W - 0.5, chartY, ML + RULER_W - 0.5, chartY + rulerH);
+
+      const tickInterval = maxTime <= 20 ? 2 : maxTime <= 60 ? 5 : maxTime <= 120 ? 10 : 20;
+      for (let t = 0; t <= maxTime; t += tickInterval) {
+        const ry = chartY + (t / maxTime) * rulerH;
+        doc.setFont("helvetica","normal");
         doc.setFontSize(6);
-        doc.setFont("helvetica","italic");
-        doc.setTextColor(0, 217, 163);
-        doc.text(`target ${fmtMin(minTime)}`, chartX + chartW + 1, targetY + 1);
+        doc.setTextColor(90, 96, 112);
+        const lbl = fmtMin(t);
+        doc.text(lbl, ML + RULER_W - 2 - doc.getTextWidth(lbl), ry + 1.2);
+        doc.setDrawColor(22, 25, 36);
+        doc.setLineWidth(0.15);
+        doc.line(ML + RULER_W, ry, ML + RULER_W + chartW, ry);
       }
 
-      // ── Column backgrounds + task blocks ─────────────────────────────────────
-      operators.forEach((op, opIdx) => {
-        const x = chartX + opIdx * colW;
+      // Target line (fastest finisher)
+      if (minTime > 0 && minTime < maxTime) {
+        const targetY = chartY + (minTime / maxTime) * rulerH;
+        doc.setDrawColor(0, 217, 163, 0.65);
+        doc.setLineWidth(0.5);
+        doc.setLineDashPattern([2.5, 1.5], 0);
+        doc.line(ML + RULER_W, targetY, ML + RULER_W + chartW, targetY);
+        doc.setLineDashPattern([], 0);
+        doc.setFont("helvetica","italic");
+        doc.setFontSize(6);
+        doc.setTextColor(0, 217, 163);
+        doc.text(`target ${fmtMin(minTime)}`, ML, targetY - 0.5);
+      }
 
-        // alternating column shade
-        if (opIdx % 2 === 0) {
-          doc.setFillColor(13, 15, 20);
-          doc.rect(x, chartY, colW, chartH, "F");
-        }
+      // ── Footer legend ─────────────────────────────────────────────────────
+      const footerY = PAGE_H - MB - FOOT_H + 3;
+      doc.setDrawColor(30, 33, 48);
+      doc.setLineWidth(0.25);
+      doc.line(ML, footerY - 1, PAGE_W - MR, footerY - 1);
 
-        // left column border
-        doc.setDrawColor(30, 33, 48);
-        doc.setLineWidth(0.25);
-        doc.line(x, chartY, x, chartY + chartH);
-
-        // tasks
-        let cursor = 0;
-        op.tasks.forEach(task => {
-          const ty  = chartY + (cursor / totalMin) * chartH;
-          const th  = (task.duration / totalMin) * chartH;
-          cursor   += task.duration;
-
-          const isWait = task.isWait;
-          const tt  = isWait ? { color: WAIT_COLOR } : (taskTypes.find(t => t.name === task.type) || { color:"#888888" });
-          const tc  = tt.color;
-          const tr2 = parseInt(tc.slice(1,3),16);
-          const tg2 = parseInt(tc.slice(3,5),16);
-          const tb2 = parseInt(tc.slice(5,7),16);
-          const blockH = Math.max(th - 0.8, 0.8);
-
-          if (isWait) {
-            // hatched wait block
-            doc.setFillColor(tr2, tg2, tb2, 0.18);
-            doc.setDrawColor(tr2, tg2, tb2, 0.6);
-            doc.setLineWidth(0.4);
-            doc.roundedRect(x + 1, ty + 0.4, colW - 2, blockH, 0.8, 0.8, "FD");
-            // diagonal hatch lines inside
-            const hatchStep = 3;
-            doc.setDrawColor(tr2, tg2, tb2, 0.35);
-            doc.setLineWidth(0.2);
-            for (let hx = x + 1; hx < x + colW - 1 + blockH; hx += hatchStep) {
-              const x1 = Math.max(hx, x + 1),        y1 = ty + 0.4 + Math.max(0, hx - (x + 1));
-              const x2 = Math.min(hx - blockH, x + colW - 1), y2 = ty + 0.4 + blockH;
-              if (x2 > x1) doc.line(x1, y1, x2, Math.min(y2, ty + 0.4 + blockH));
-            }
-          } else {
-            // solid task block
-            doc.setFillColor(tr2, tg2, tb2, 0.55);
-            doc.setDrawColor(tr2, tg2, tb2, 0.9);
-            doc.setLineWidth(0.3);
-            doc.roundedRect(x + 1, ty + 0.4, colW - 2, blockH, 0.8, 0.8, "FD");
-          }
-
-          // Task name — show when block is tall enough
-          if (th >= 3.5) {
-            doc.setFont("helvetica", isWait ? "italic" : "bold");
-            const nameFontSize = Math.min(7, Math.max(5, th * 0.45));
-            doc.setFontSize(nameFontSize);
-            doc.setTextColor(255, 255, 255);
-            const maxCh = Math.floor((colW - 5) / (nameFontSize * 0.52));
-            const rawName = isWait ? "⏸ Waiting" : task.name;
-            const nameClipped = rawName.length > maxCh ? rawName.slice(0, maxCh - 1) + "…" : rawName;
-            doc.text(nameClipped, x + 2.5, ty + Math.min(blockH * 0.52, nameFontSize * 0.45 + 1.5));
-          }
-
-          // Duration label — show when there's room
-          if (th >= 6) {
-            doc.setFont("helvetica","normal");
-            doc.setFontSize(Math.min(6.5, th * 0.35));
-            doc.setTextColor(tr2, tg2, tb2);
-            const durLbl = fmtMin(task.duration);
-            doc.text(durLbl, x + 2.5, ty + Math.min(blockH * 0.82, blockH - 1.5));
-          }
-        });
-      });
-
-      // Right border of chart
-      doc.setDrawColor(37, 42, 56);
-      doc.setLineWidth(0.4);
-      doc.line(chartX + chartW, chartY, chartX + chartW, chartY + chartH);
-      // Top and bottom borders
-      doc.line(chartX, chartY, chartX + chartW, chartY);
-      doc.line(chartX, chartY + chartH, chartX + chartW, chartY + chartH);
-
-      // ── Footer: legend + branding ─────────────────────────────────────────────
-      const footerY = chartY + chartH + 6;
       let lx = chartX;
-
-      // Task type legend
-      doc.setFont("helvetica","bold");
-      doc.setFontSize(6.5);
-      taskTypes.forEach(tt => {
-        const r3 = parseInt(tt.color.slice(1,3),16);
-        const g3 = parseInt(tt.color.slice(3,5),16);
-        const b3 = parseInt(tt.color.slice(5,7),16);
-        doc.setFillColor(r3, g3, b3);
-        doc.roundedRect(lx, footerY, 5, 4, 0.5, 0.5, "F");
-        doc.setTextColor(200, 206, 218);
-        doc.text(tt.name, lx + 6.5, footerY + 3.2);
-        lx += doc.getTextWidth(tt.name) + 14;
+      const legendItems = [
+        ...taskTypes.map(tt => ({ label: tt.name, color: tt.color, wait: false })),
+        { label: "Waiting / Downtime", color: WAIT_COLOR, wait: true },
+      ];
+      legendItems.forEach(({ label, color, wait }) => {
+        const [lr, lg, lb] = [parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)];
+        // Swatch: dark grey fill + coloured border
+        doc.setFillColor(24, 28, 40);
+        doc.setDrawColor(lr, lg, lb);
+        doc.setLineWidth(0.5);
+        if (wait) doc.setLineDashPattern([1.5,1], 0);
+        doc.roundedRect(lx, footerY, 7, 4.5, 0.5, 0.5, "FD");
+        if (wait) doc.setLineDashPattern([], 0);
+        doc.setFont("helvetica","normal");
+        doc.setFontSize(6.5);
+        doc.setTextColor(190, 196, 210);
+        doc.text(label, lx + 9, footerY + 3.2);
+        lx += 9 + doc.getTextWidth(label) + 6;
       });
 
-      // Wait legend
-      const wr = parseInt(WAIT_COLOR.slice(1,3),16), wg = parseInt(WAIT_COLOR.slice(3,5),16), wb2 = parseInt(WAIT_COLOR.slice(5,7),16);
-      doc.setFillColor(wr, wg, wb2, 0.35);
-      doc.setDrawColor(wr, wg, wb2);
-      doc.setLineWidth(0.3);
-      doc.roundedRect(lx, footerY, 5, 4, 0.5, 0.5, "FD");
-      doc.setFont("helvetica","normal");
-      doc.setTextColor(200, 206, 218);
-      doc.text("⏸ Waiting / Downtime", lx + 6.5, footerY + 3.2);
-
-      // Branding bottom-right
+      // Branding
       doc.setFont("helvetica","italic");
-      doc.setFontSize(6);
-      doc.setTextColor(42, 48, 64);
-      doc.text("Generated by SMED Runner · smed-runner.vercel.app", PAGE_W - MARGIN_R - doc.getTextWidth("Generated by SMED Runner · smed-runner.vercel.app"), PAGE_H - 5);
+      doc.setFontSize(5.5);
+      doc.setTextColor(40, 46, 60);
+      const brand = "Generated by SMED Runner · smed-runner.vercel.app";
+      doc.text(brand, PAGE_W - MR - doc.getTextWidth(brand), PAGE_H - MB + 1);
 
       doc.save(`${activeProject.name.replace(/[^a-z0-9]/gi,"_")}_gantt_A3.pdf`);
     } catch (err) {
       alert("PDF export failed: " + err.message);
     }
   }
+
 
   // ── Export Excel Template ──────────────────────────────────────────────────
   async function exportExcelTemplate() {
@@ -2477,7 +2492,7 @@ create policy "public_all_projects" on projects
                     <div data-opid={op.id} data-tidx={op.tasks.length}
                       onDragOver={e=>onDragOver(e,op.id,op.tasks.length)}
                       onDrop={e=>onDrop(e,op.id,op.tasks.length)}
-                      style={{height:30,border:"1px dashed",borderColor:dragOver?.opId===op.id&&dragOver?.index===op.tasks.length?"#4ECDC4":"#3A4150",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#5a6478",letterSpacing:"0.1em",transition:"all 0.2s"}}>
+                      style={{height:30,border:"1px dashed",borderColor:dragOver?.opId===op.id&&dragOver?.index===op.tasks.length?"#4ECDC4":"var(--smed-b2)",borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"var(--smed-muted)",letterSpacing:"0.1em",transition:"all 0.2s"}}>
                       DROP HERE
                     </div>
                   </div>
@@ -2506,7 +2521,7 @@ create policy "public_all_projects" on projects
                       <button onClick={()=>setShowAddTask(op.id)}
                         style={{width:"100%",padding:"8px",background:"var(--smed-card2)",border:"1px dashed var(--smed-b3)",color:"var(--smed-muted)",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.borderColor="#FF6B35";e.target.style.color="#FF6B35";}}
-                        onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
+                        onMouseLeave={e=>{e.target.style.borderColor="var(--smed-b2)";e.target.style.color="#8a94a8";}}>
                         + ADD TASK
                       </button>
                     )}
@@ -2514,7 +2529,7 @@ create policy "public_all_projects" on projects
                       <button onClick={()=>setShowTemplPicker(op.id)}
                         style={{flex:1,padding:"8px",background:"var(--smed-card2)",border:"1px dashed var(--smed-b3)",color:"var(--smed-muted)",fontFamily:"inherit",fontSize:11,cursor:"pointer",borderRadius:8,letterSpacing:"0.06em",transition:"all 0.2s",fontWeight:600}}
                         onMouseEnter={e=>{e.target.style.borderColor="#4ECDC4";e.target.style.color="#4ECDC4";}}
-                        onMouseLeave={e=>{e.target.style.borderColor="#3A4150";e.target.style.color="#8a94a8";}}>
+                        onMouseLeave={e=>{e.target.style.borderColor="var(--smed-b2)";e.target.style.color="#8a94a8";}}>
                         ⊞ TEMPLATE
                       </button>
                       <button onClick={()=>requestWait(op.id, null)} title="Add waiting / downtime block"
@@ -2532,10 +2547,10 @@ create policy "public_all_projects" on projects
             {operators.length<10&&(
               <div style={{minWidth:120,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8,paddingTop:30,flexShrink:0}}>
                 <button onClick={addOperator}
-                  style={{width:48,height:48,borderRadius:"50%",background:"transparent",border:"2px dashed #1E2130",color:"#2A2D3A",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.2s",fontFamily:"inherit"}}
+                  style={{width:48,height:48,borderRadius:"50%",background:"transparent",border:"2px dashed var(--smed-b1)",color:"var(--smed-muted)",fontSize:22,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.2s",fontFamily:"inherit"}}
                   onMouseEnter={e=>{e.currentTarget.style.borderColor="#4ECDC4";e.currentTarget.style.color="#4ECDC4";}}
-                  onMouseLeave={e=>{e.currentTarget.style.borderColor="#1E2130";e.currentTarget.style.color="#2A2D3A";}}>+</button>
-                <span style={{fontSize:8,color:"#2A2D3A",letterSpacing:"0.08em",textAlign:"center"}}>ADD<br/>OPERATOR</span>
+                  onMouseLeave={e=>{e.currentTarget.style.borderColor="var(--smed-b1)";e.currentTarget.style.color="var(--smed-muted)";}}>+</button>
+                <span style={{fontSize:8,color:"var(--smed-muted)",letterSpacing:"0.08em",textAlign:"center"}}>ADD<br/>OPERATOR</span>
               </div>
             )}
           </div>
@@ -2774,12 +2789,16 @@ const globalCSS = `
     --smed-card2:#1A1F2B; --smed-b1:#1E2130; --smed-b2:#252A38; --smed-b3:#2E3445;
     --smed-text:#FFFFFF; --smed-body:#E2E8F0; --smed-sub:#8a94a8; --smed-muted:#5a6478;
     --smed-bar:#252A38;
+    --smed-dur:#FFD93D;
+    --smed-wait-a:#20242E; --smed-wait-b:#181C24;
   }
   :root.light {
     --smed-bg:#ECEEF2; --smed-bg2:#E8ECF0; --smed-nav:#E2E5EB; --smed-card:#F4F5F8;
     --smed-card2:#DDE0E8; --smed-b1:#C8CDD8; --smed-b2:#BFC4CF; --smed-b3:#B8BCC8;
     --smed-text:#1A1C28; --smed-body:#2E3348; --smed-sub:#5A6070; --smed-muted:#7A8090;
     --smed-bar:#D0D4DC;
+    --smed-dur:#B07010;
+    --smed-wait-a:#D4D8E0; --smed-wait-b:#E0E4EA;
   }
   body { background:var(--smed-bg); color:var(--smed-body); -webkit-tap-highlight-color:transparent; transition:background 0.25s, color 0.25s; }
   @keyframes blink  { 0%,100%{opacity:1;} 50%{opacity:0.15;} }
